@@ -1,12 +1,15 @@
+import os
+import pickle
+import random
+
+import numpy as np
 import torch
 import torchvision
 import torchvision.transforms as transforms
-import numpy as np
-import random
-import os
-import pickle
 
 """ Dataset partitioning helper """
+
+
 class Partition(object):
 
     def __init__(self, data, index):
@@ -39,6 +42,7 @@ class DataPartitioner(object):
 
     def use(self, partition):
         return Partition(self.data, self.partitions[partition])
+
 
 class Cifar:
     @staticmethod
@@ -85,10 +89,8 @@ class Cifar_EXT:
         aux_targets = aux['extrapolated_targets']
         orig_len = len(trainset.data)
 
-
         trainset.data = np.concatenate((trainset.data, aux_data), axis=0)
         trainset.targets.extend(aux_targets)
-
 
         train_sampler = torch.utils.data.distributed.DistributedSampler(trainset, world_size, rank, shuffle=True)
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False,
@@ -100,6 +102,7 @@ class Cifar_EXT:
         testset = torchvision.datasets.CIFAR10(root=root, train=False, download=True, transform=transform_test)
         testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=4)
         return trainloader, testloader, train_sampler
+
 
 class ImageNet:
     @staticmethod
@@ -116,7 +119,7 @@ class ImageNet:
 
         train_sampler = torch.utils.data.distributed.DistributedSampler(trainset, world_size, rank, shuffle=True)
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False,
-                                                  sampler=train_sampler,num_workers=32, pin_memory=True)
+                                                  sampler=train_sampler, num_workers=32, pin_memory=True)
 
         transform_test = transforms.Compose([
             transforms.Resize(256),

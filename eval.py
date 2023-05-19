@@ -1,15 +1,14 @@
-import torch
-from tqdm import tqdm
-from attack import PGD
 import argparse
-from models import PreActResNet18
-from torchvision.models import resnet50
-from utils import torch_accuracy, AvgMeter
-from dataset import Cifar, Cifar_EXT, ImageNet
-import numpy as np
 from collections import OrderedDict
 
+import torch
+from torchvision.models import resnet50
+from tqdm import tqdm
 
+from attack import PGD
+from dataset import Cifar_EXT, ImageNet
+from models import PreActResNet18
+from utils import AvgMeter, torch_accuracy
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--dataset', default='cifar', choices=['cifar', 'imagenet'],
@@ -19,6 +18,7 @@ parser.add_argument('--dataset-path', type=str,
 parser.add_argument('--checkpoint', type=str,
                     help='model checkpoint path')
 
+
 def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
     net.eval()
     pbar = tqdm(data_loader)
@@ -27,7 +27,7 @@ def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
 
     pbar.set_description('Evaluating')
     eps, step = es
-    at_eval = PGD(eps=eps/ 255.0, sigma=2/255.0, nb_iter=step)
+    at_eval = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step)
     for (data, label) in pbar:
         data = data.to(DEVICE)
         label = label.to(DEVICE)
@@ -36,7 +36,6 @@ def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
             pred = net(data)
             acc = torch_accuracy(pred, label, (1,))
             clean_accuracy.update(acc[0].item(), acc[0].size(0))
-
 
         adv_inp = at_eval.attack(net, data, label)
 
@@ -53,7 +52,6 @@ def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
     return clean_accuracy.mean, adv_accuracy.mean
 
 
-
 def main():
     args = parser.parse_args()
     print(args)
@@ -65,7 +63,7 @@ def main():
         batch_size = 2048
 
         ds_train, ds_val, sp_train = Cifar_EXT.get_loader(batch_size, 1, 0, args.dataset_path)
-        es =(8.0, 10)
+        es = (8.0, 10)
 
 
     elif args.dataset == 'imagenet':
@@ -73,7 +71,6 @@ def main():
         batch_size = 512
 
         net = resnet50()
-
 
         ds_train, ds_val, sp_train = ImageNet.get_loader(batch_size, 1, 0, args.dataset_path)
         es = (2.0, 4)

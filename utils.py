@@ -1,12 +1,12 @@
 import math
 import os
+
 import torch
 
-#Source code from https://github.com/a1600012888/YOPO-You-Only-Propagate-Once
+
+# Source code from https://github.com/a1600012888/YOPO-You-Only-Propagate-Once
 
 def torch_accuracy(output, target, topk=(1,)):
-
-
     topn = max(topk)
     batch_size = output.size(0)
 
@@ -22,8 +22,8 @@ def torch_accuracy(output, target, topk=(1,)):
 
     return ans
 
-class AvgMeter(object):
 
+class AvgMeter(object):
     name = 'No name'
 
     def __init__(self, name='No name'):
@@ -47,22 +47,23 @@ class AvgMeter(object):
         self.mean = float(self.sum) / self.num
 
 
-
 def mkdir(path):
     if not os.path.exists(path):
         print('creating dir {}'.format(path))
         os.mkdir(path)
 
+
 def save_checkpoint(now_epoch, net, optimizer, lr_scheduler, file_name):
     checkpoint = {'epoch': now_epoch,
                   'state_dict': net.module.state_dict(),
                   'optimizer_state_dict': optimizer.state_dict(),
-                  'lr_scheduler_state_dict':lr_scheduler.state_dict()}
+                  'lr_scheduler_state_dict': lr_scheduler.state_dict()}
     if os.path.exists(file_name):
         print('Overwriting {}'.format(file_name))
     torch.save(checkpoint, file_name)
 
-def load_checkpoint(file_name, net = None, optimizer = None, lr_scheduler = None):
+
+def load_checkpoint(file_name, net=None, optimizer=None, lr_scheduler=None):
     if os.path.isfile(file_name):
         print("=> loading checkpoint '{}'".format(file_name))
         check_point = torch.load(file_name)
@@ -79,5 +80,3 @@ def load_checkpoint(file_name, net = None, optimizer = None, lr_scheduler = None
         return check_point['epoch']
     else:
         print("=> no checkpoint found at '{}'".format(file_name))
-
-
