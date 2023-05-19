@@ -8,7 +8,7 @@ from quantization import RandomQuantizer
 from attack import PGD
 from torch.autograd import Variable
 from dataset import Cifar, Cifar_EXT, ImageNet
-from models import PreActResNet18
+from trainer.dat.models import PreActResNet18
 from utils import save_checkpoint, torch_accuracy, AvgMeter
 from torchvision.models import resnet50
 from lamb import Lamb
