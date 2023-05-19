@@ -1,6 +1,7 @@
 import torch
 from torch.optim import Optimizer
 
+
 # Source code from https://github.com/cybertronai/pytorch-lamb
 class Lamb(Optimizer):
     r"""Implements Lamb algorithm.
@@ -74,7 +75,7 @@ class Lamb(Optimizer):
                 # v_t
                 exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
 
-                step_size = group['lr'] # * math.sqrt(bias_correction2) / bias_correction1
+                step_size = group['lr']  # * math.sqrt(bias_correction2) / bias_correction1
 
                 weight_norm = p.data.pow(2).sum().sqrt().clamp(0, 10)
 
@@ -96,4 +97,3 @@ class Lamb(Optimizer):
                 p.data.add_(-step_size * trust_ratio, adam_step)
 
         return loss
-
