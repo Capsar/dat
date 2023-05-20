@@ -13,7 +13,6 @@ from trainer.dat.utils import save_checkpoint, torch_accuracy, AvgMeter
 from torchvision.models import resnet50
 from trainer.dat.lamb import Lamb
 
-
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--dataset', default='cifar', choices=['cifar', 'cifarext', 'imagenet'],
                     help='dataset cifar or imagenet')
