@@ -2,4 +2,4 @@ data/
 models/
 dist/
 __pycache__/
-dat_package.egg-info/
+*.egg-info/
