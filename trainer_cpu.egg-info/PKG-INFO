@@ -1,4 +1,0 @@
-Metadata-Version: 2.1
-Name: trainer-cpu
-Version: 0.1
-Summary: Training code application for DAT (Distributed Adversarial Training). Based on paper of Distributed Adversarial Training to Robustify Deep Neural Networks at Scale.
