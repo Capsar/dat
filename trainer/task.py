@@ -44,7 +44,7 @@ parser.add_argument('--output-dir', default='saved_models', type=str,
                     help='output directory')
 
 qt = RandomQuantizer()
-def distributed(param, rank, size):
+def distributed(param, rank, size, DEVICE):
     quantization = False
     if quantization:
         if size == 1:
@@ -58,7 +58,7 @@ def distributed(param, rank, size):
         tmp = torch.zeros_like(cpu_grad)
         for q, norm in zip(q_list, norm_list):
             tmp += qt.dequantize(q, norm)
-        param.grad = tmp.cuda()
+        param.grad = tmp.to(DEVICE)
     else:
         dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
     param.grad.data /= float(size)
@@ -67,8 +67,7 @@ def fgsm(gradz, step_size):
 
 # global global_noise_data
 # global_noise_data = torch.zeros([512, 3, 224, 224]).cuda()
-def train(net, data_loader, optimizer,
-          criterion, DEVICE=torch.device('cuda:0'),
+def train(net, data_loader, optimizer, criterion, DEVICE,
           descrip_str='', es = (8.0, 10), fast=False, lr_scheduler=None, warmup=False):
 
 
@@ -84,7 +83,7 @@ def train(net, data_loader, optimizer,
 
     eps, step = es
     if not fast:
-        at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step)
+        at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step, DEVICE=DEVICE)
         for i, (data, label) in enumerate(pbar):
             if i == 0:
                 for param in net.parameters():
@@ -115,7 +114,7 @@ def train(net, data_loader, optimizer,
             loss.backward()
 
             for param in net.parameters():
-                distributed(param, rank, size)
+                distributed(param, rank, size, DEVICE)
 
             optimizer.step()
             if warmup:
@@ -140,7 +139,7 @@ def train(net, data_loader, optimizer,
                 for param in net.parameters():
                     dist.broadcast(param.data, 0)
             for j in range(1):
-                noise_batch = Variable(global_noise_data[0:data.size(0)], requires_grad=True).cuda()
+                noise_batch = Variable(global_noise_data[0:data.size(0)], requires_grad=True).to(DEVICE)
                 in1 = data + noise_batch
                 in1.clamp_(0, 1.0)
                 output = net(in1)
@@ -158,7 +157,7 @@ def train(net, data_loader, optimizer,
                 global_noise_data.clamp_(-eps/255.0, eps/255.0)
 
                 # Dscend on the global noise
-                noise_batch = Variable(global_noise_data[0:data.size(0)], requires_grad=False).cuda()
+                noise_batch = Variable(global_noise_data[0:data.size(0)], requires_grad=False).to(DEVICE)
                 in1 = data + noise_batch
                 in1.clamp_(0, 1.0)
                 output = net(in1)
@@ -167,7 +166,7 @@ def train(net, data_loader, optimizer,
                 optimizer.zero_grad()
                 loss.backward()
                 for param in net.parameters():
-                    distributed(param, rank, size)
+                    distributed(param, rank, size, DEVICE)
                 optimizer.step()
                 if warmup:
                     lr_scheduler.step()
@@ -228,15 +227,15 @@ def main():
     batch_size = args.batch_size
     num_epochs = args.num_epochs
     eval_epochs = args.eval_epochs
-    DEVICE = torch.device('cuda:0')
+    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
     global global_noise_data
     if args.dataset == 'cifar' or args.dataset == 'cifarext':
 
-        global_noise_data = torch.zeros([batch_size, 3, 32, 32]).cuda()
+        global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
 
         net = PreActResNet18().to(DEVICE)
-        net = torch.nn.DistributedDataParallel(net).to(DEVICE)
+        net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
@@ -251,10 +250,10 @@ def main():
         es =(8.0, 10)
 
     elif args.dataset == 'imagenet':
-        global_noise_data = torch.zeros([batch_size, 3, 224, 224]).cuda()
+        global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
 
         net = resnet50().to(DEVICE)
-        net = torch.nn.DistributedDataParallel(net).to(DEVICE)
+        net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
