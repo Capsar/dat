@@ -14,6 +14,8 @@ from torchvision.models import resnet50
 from trainer.dat.lamb import Lamb
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
+parser.add_argument('--gcloud', default=False, type=bool, 
+                    help='whether the code is running on gcloud')
 parser.add_argument('--dataset', default='cifar', choices=['cifar', 'cifarext', 'imagenet'],
                     help='dataset cifar or imagenet')
 parser.add_argument('--world-size', default=-1, type=int,
@@ -64,7 +66,7 @@ def fgsm(gradz, step_size):
     return step_size*torch.sign(gradz)
 
 # global global_noise_data
-global_noise_data = torch.zeros([512, 3, 224, 224]).cuda()
+# global_noise_data = torch.zeros([512, 3, 224, 224]).cuda()
 def train(net, data_loader, optimizer,
           criterion, DEVICE=torch.device('cuda:0'),
           descrip_str='', es = (8.0, 10), fast=False, lr_scheduler=None, warmup=False):
@@ -212,7 +214,15 @@ def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
 
 
 def main():
+    print('start')	
     args = parser.parse_args()
+    if args.gcloud:
+        # Get the rank and world size from the environment variables
+        args.rank = int(os.environ['RANK'])
+        args.world_size = int(os.environ['WORLD_SIZE'])
+        args.dist_url = 'env://'
+        print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], os.environ['RANK'], os.environ['WORLD_SIZE'])
+
     print(args)
     dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
     batch_size = args.batch_size
@@ -225,8 +235,8 @@ def main():
 
         global_noise_data = torch.zeros([batch_size, 3, 32, 32]).cuda()
 
-        net = PreActResNet18()
-        net = torch.nn.DataParallel(net).to(DEVICE)
+        net = PreActResNet18().to(DEVICE)
+        net = torch.nn.DistributedDataParallel(net).to(DEVICE)
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
@@ -243,8 +253,8 @@ def main():
     elif args.dataset == 'imagenet':
         global_noise_data = torch.zeros([batch_size, 3, 224, 224]).cuda()
 
-        net = resnet50()
-        net = torch.nn.DataParallel(net).to(DEVICE)
+        net = resnet50().to(DEVICE)
+        net = torch.nn.DistributedDataParallel(net).to(DEVICE)
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
