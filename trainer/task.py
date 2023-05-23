@@ -235,7 +235,8 @@ def main():
         global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
 
         net = PreActResNet18().to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+        # net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+        net = torch.nn.DataParallel(net).to(DEVICE)
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
@@ -253,7 +254,8 @@ def main():
         global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
 
         net = resnet50().to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+        # net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+        net = torch.nn.DataParallel(net).to(DEVICE)
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
@@ -270,7 +272,6 @@ def main():
 
     warm_up_lr_lchedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
     
-    #
     # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
     #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
 
