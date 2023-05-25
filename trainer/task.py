@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.distributed as dist
 import argparse
@@ -72,7 +73,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
 
 
     net.train()
-    pbar = tqdm(data_loader, ncols=200)
+    pbar = tqdm(data_loader, ncols=200, file=sys.stdout)
     advacc = -1
     advloss = -1
     cleanacc = -1
