@@ -10,6 +10,7 @@ setup(
         'torchvision',	
         'numpy',
         'tqdm',
+        'wandb',
     ],
     # entry_points={
     #         'console_scripts': [

@@ -13,6 +13,7 @@ from trainer.dat.models import PreActResNet18
 from trainer.dat.utils import save_checkpoint, torch_accuracy, AvgMeter
 from torchvision.models import resnet50
 from trainer.dat.lamb import Lamb
+import wandb
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool, 
