@@ -7,3 +7,4 @@ __pycache__/
 venv/
 .idea/
 .env
+trainer/wandb_api.py
