@@ -10,6 +10,7 @@ setup(
         'torchvision',	
         'numpy',
         'tqdm',
+        'requests',
     ],
     # entry_points={
     #         'console_scripts': [
