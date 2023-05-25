@@ -10,6 +10,7 @@ setup(
         'torchvision',	
         'numpy',
         'tqdm',
+        'requests',
         'wandb',
     ],
     # entry_points={

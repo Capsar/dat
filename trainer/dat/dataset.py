@@ -115,7 +115,8 @@ class ImageNet:
             transforms.ToTensor(),
         ])
 
-        trainset = torchvision.datasets.ImageFolder(root=os.path.join(root, 'train'), transform=transform_train)
+        #trainset = torchvision.datasets.ImageFolder(root=os.path.join(root, 'train'), transform=transform_train)
+        trainset = torchvision.datasets.ImageFolder(root=root, transform=transform_train)
 
         train_sampler = torch.utils.data.distributed.DistributedSampler(trainset, world_size, rank, shuffle=True)
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False,
@@ -126,6 +127,9 @@ class ImageNet:
             transforms.CenterCrop(224),
             transforms.ToTensor(),
         ])
-        testset = torchvision.datasets.ImageFolder(root=os.path.join(root, 'val'), transform=transform_test)
+
+        #testset = torchvision.datasets.ImageFolder(root=os.path.join(root, 'val'), transform=transform_test)
+        testset = torchvision.datasets.ImageFolder(root=root, transform=transform_test)
+
         testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, pin_memory=True)
         return trainloader, testloader, train_sampler

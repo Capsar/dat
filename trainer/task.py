@@ -1,4 +1,6 @@
 import json
+import time
+import logging
 import sys
 import torch
 import torch.distributed as dist
@@ -14,6 +16,8 @@ from trainer.dat.models import PreActResNet18
 from trainer.dat.utils import save_checkpoint, torch_accuracy, AvgMeter
 from torchvision.models import resnet50
 from trainer.dat.lamb import Lamb
+from trainer.dat.helpers import send_telegram_message
+
 import wandb
 from trainer.wandb_api import API_KEY
 
@@ -49,6 +53,14 @@ parser.add_argument('--group_surfix', default='timestamp', type=str, help='group
 parser.add_argument('--machine_type', default='local', type=str, help='machine type for wandb logging')
 parser.add_argument('--accelerator_type', default='cpu', type=str, help='accelerator type for wandb logging')
 
+timing_logger = logging.getLogger('timing_logger')
+timing_logger.setLevel(logging.INFO)
+file_handler = logging.FileHandler('/gcs/dat-project-bucket/log/timing.log')
+file_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+timing_logger.addHandler(file_handler)
+
 qt = RandomQuantizer()
 def distributed(param, rank, size, DEVICE):
     quantization = False
@@ -66,7 +78,29 @@ def distributed(param, rank, size, DEVICE):
             tmp += qt.dequantize(q, norm)
         param.grad = tmp.to(DEVICE)
     else:
+        start = time.perf_counter()
+        start_msg = f'COM_LOG: START at {start}'
+        timing_logger.info(start_msg)
+        print(start_msg)
+        dist.barrier()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        start_event.record()
         dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+        end_event.record()
+
+        dist.barrier()
+
+        torch.cuda.synchronize()
+        elapsed_time = start_event.elapsed_time(end_event)
+        end_msg1 = f'COM_LOG: END at {time.perf_counter()} delta: {time.perf_counter() - start}'
+        print(end_msg1)
+        timing_logger.info(end_msg1)
+        end_msg2 = f'COM_LOG: Communication time (ms): {elapsed_time}'
+        print(end_msg2)
+        timing_logger.info(end_msg2)
+
     param.grad.data /= float(size)
 def fgsm(gradz, step_size):
     return step_size*torch.sign(gradz)
@@ -241,6 +275,7 @@ def main():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     args.device = DEVICE
     group_name = f'T_{args.group_surfix}'
+    send_telegram_message(message=f'Starting main() in task.py with args: {args}')
     if args.gcloud:
         # Get the rank and world size from the environment variables
         args.rank = int(os.environ['RANK'])
@@ -266,6 +301,7 @@ def main():
     criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
     global global_noise_data
     if args.dataset == 'cifar' or args.dataset == 'cifarext':
+        print('using CIFAR')
 
         global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
 
@@ -286,6 +322,7 @@ def main():
         es =(8.0, 10)
 
     elif args.dataset == 'imagenet':
+        print('using IMAGENET')
         global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
 
         net = resnet50().to(DEVICE)
@@ -327,7 +364,12 @@ def main():
         lr_scheduler.step()
 
         if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
-            eval(net, ds_val, DEVICE, es)
+            clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
+            message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
+            if send_telegram_message(message=message):
+                print('successfully sent Telegram message!')
+            else:
+                print('error sending Telegram message!')
 
         if args.rank == 0 and (epoch+1) % 10 == 0:
             if not os.path.exists(args.output_dir):

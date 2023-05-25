@@ -3,4 +3,8 @@ models/
 dist/
 __pycache__/
 *.egg-info/
+.ipynb_checkpoints/
+venv/
+.idea/
+.env
 trainer/wandb_api.py
