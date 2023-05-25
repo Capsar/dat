@@ -3,3 +3,4 @@ models/
 dist/
 __pycache__/
 *.egg-info/
+trainer/wandb_api.py

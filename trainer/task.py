@@ -1,3 +1,4 @@
+import json
 import sys
 import torch
 import torch.distributed as dist
@@ -14,6 +15,7 @@ from trainer.dat.utils import save_checkpoint, torch_accuracy, AvgMeter
 from torchvision.models import resnet50
 from trainer.dat.lamb import Lamb
 import wandb
+from trainer.wandb_api import API_KEY
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool, 
@@ -42,8 +44,10 @@ parser.add_argument('--lr', default=0.01, type=float,
                     help='learning rates')
 parser.add_argument('--dataset-path', type=str,
                     help='dataset folder')
-parser.add_argument('--output-dir', default='saved_models', type=str,
-                    help='output directory')
+parser.add_argument('--output-dir', default='saved_models', type=str, help='output directory')
+parser.add_argument('--group_surfix', default='timestamp', type=str, help='group name for wandb logging')
+parser.add_argument('--machine_type', default='local', type=str, help='machine type for wandb logging')
+parser.add_argument('--accelerator_type', default='cpu', type=str, help='accelerator type for wandb logging')
 
 qt = RandomQuantizer()
 def distributed(param, rank, size, DEVICE):
@@ -72,6 +76,10 @@ def fgsm(gradz, step_size):
 def train(net, data_loader, optimizer, criterion, DEVICE,
           descrip_str='', es = (8.0, 10), fast=False, lr_scheduler=None, warmup=False):
 
+    if descrip_str != '':
+        descrip = descrip_str.split(':')[0]
+        epoch = descrip_str.split(':')[1].split('/')[0]
+        total_epoch = descrip_str.split(':')[1].split('/')[1]
 
     net.train()
     pbar = tqdm(data_loader, ncols=200, file=sys.stdout)
@@ -124,6 +132,19 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
             acc = torch_accuracy(pred, label, (1,))
             cleanacc = acc[0].item()
             cleanloss = loss.item()
+            metrics = {
+                f"{descrip}/clean_acc": cleanacc,
+                f"{descrip}/clean_loss": cleanloss,
+                f"{descrip}/adv_acc": advacc,
+                f"{descrip}/adv_loss": advloss,
+                f"{descrip}/lr": lr_scheduler.get_lr()[0],
+                f"{descrip}/epoch": int(epoch),
+                f"{descrip}/total_epoch": int(total_epoch),
+                f"{descrip}/rank": rank,
+                f"{descrip}/world_size": size,
+                f"{descrip}/batch_nr": i,
+            }
+            wandb.log(metrics)
             pbar_dic['standard test acc'] = '{:.2f}'.format(cleanacc)
             pbar_dic['standard test loss'] = '{:.2f}'.format(cleanloss)
             pbar_dic['robust acc'] = '{:.2f}'.format(advacc)
@@ -215,21 +236,33 @@ def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
 
 
 def main():
-    print('start')	
+    print('start')
     args = parser.parse_args()
+    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    args.device = DEVICE
+    group_name = f'T_{args.group_surfix}'
     if args.gcloud:
         # Get the rank and world size from the environment variables
         args.rank = int(os.environ['RANK'])
         args.world_size = int(os.environ['WORLD_SIZE'])
         args.dist_url = 'env://'
         print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], os.environ['RANK'], os.environ['WORLD_SIZE'])
+        cluster_spec = json.loads(os.environ['CLUSTER_SPEC'])
+        task_type = cluster_spec["task"]["type"]
+        task_index = cluster_spec["task"]["index"]
+        args.task_name = f"{task_type}-{task_index}-R{args.rank}"
+        args.accelerator_count = 0
+        if torch.cuda.is_available():
+            args.accelerator_count = torch.cuda.device_count()
 
-    print(args)
+        group_name = f'{args.machine_type}_{args.world_size}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
+
+    wandb.login(key=API_KEY)
+    wandb.init(project="sdml-dat", group=group_name, name=args.task_name, config=args)
     dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
     batch_size = args.batch_size
     num_epochs = args.num_epochs
     eval_epochs = args.eval_epochs
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
     global global_noise_data
     if args.dataset == 'cifar' or args.dataset == 'cifarext':
@@ -277,9 +310,9 @@ def main():
     # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
     #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
 
-    for epoch in range(5):
+    for epoch in range(n_warm_up_epochs:=5):
     #
-        descrip_str = 'warmup epoch:{}/{}'.format(epoch, 5)
+        descrip_str = 'Warmup:{}/{}'.format(epoch, n_warm_up_epochs)
         train(net, ds_train, optimizer, criterion, DEVICE,
               descrip_str, es, fast=args.fast, lr_scheduler=warm_up_lr_lchedule, warmup=True)
 
@@ -287,7 +320,7 @@ def main():
 
         sp_train.set_epoch(epoch)
 
-        descrip_str = 'Training epoch:{}/{}'.format(epoch, num_epochs)
+        descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
         train(net, ds_train, optimizer, criterion, DEVICE,
               descrip_str, es, fast=args.fast, lr_scheduler=lr_scheduler)
 
@@ -302,9 +335,8 @@ def main():
             save_checkpoint(epoch, net, optimizer, lr_scheduler,
                             file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
 
-
     eval(net, ds_val, DEVICE, es)
-
+    wandb.finish()
 
 if __name__ == "__main__":
     main()
