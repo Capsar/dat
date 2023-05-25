@@ -1,5 +1,6 @@
 import time
 import logging
+import sys
 import torch
 import torch.distributed as dist
 import argparse
@@ -15,6 +16,8 @@ from trainer.dat.utils import save_checkpoint, torch_accuracy, AvgMeter
 from torchvision.models import resnet50
 from trainer.dat.lamb import Lamb
 from trainer.dat.helpers import send_telegram_message
+
+import wandb
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool, 
@@ -105,7 +108,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
 
 
     net.train()
-    pbar = tqdm(data_loader, ncols=200)
+    pbar = tqdm(data_loader, ncols=200, file=sys.stdout)
     advacc = -1
     advloss = -1
     cleanacc = -1

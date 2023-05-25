@@ -11,6 +11,7 @@ setup(
         'numpy',
         'tqdm',
         'requests',
+        'wandb',
     ],
     # entry_points={
     #         'console_scripts': [
