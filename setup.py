@@ -12,6 +12,8 @@ setup(
         'tqdm',
         'requests',
         'wandb',
+        'tensorboard',
+        'torch-tb-profiler',
     ],
     # entry_points={
     #         'console_scripts': [

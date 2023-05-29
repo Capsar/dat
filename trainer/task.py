@@ -21,6 +21,8 @@ from trainer.dat.helpers import send_telegram_message
 import wandb
 from trainer.wandb_api import API_KEY
 
+from torch.profiler import profile, ProfilerActivity
+
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool, 
                     help='whether the code is running on gcloud')
@@ -275,7 +277,7 @@ def main():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     args.device = DEVICE
     group_name = f'T_{args.group_surfix}'
-    send_telegram_message(message=f'Starting main() in task.py with args: {args}')
+    #send_telegram_message(message=f'Starting main() in task.py with args: {args}')
     if args.gcloud:
         # Get the rank and world size from the environment variables
         args.rank = int(os.environ['RANK'])
@@ -293,7 +295,12 @@ def main():
         group_name = f'{args.machine_type}_{args.world_size}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
 
     wandb.login(key=API_KEY)
-    wandb.init(project="sdml-dat", group=group_name, name=args.task_name, config=args)
+    wandb.init(project="sdml-dat", group=group_name, name=args.task_name, config=args, sync_tensorboard=True)
+
+    on_trace_ready = torch.profiler.tensorboard_trace_handler('./tb-log')
+    torch_profile=profile(with_stack=True, on_trace_ready=on_trace_ready,activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])
+    torch_profile.start()
+
     dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
     batch_size = args.batch_size
     num_epochs = args.num_epochs
@@ -301,13 +308,16 @@ def main():
     criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
     global global_noise_data
     if args.dataset == 'cifar' or args.dataset == 'cifarext':
-        print('using CIFAR')
+        print('using CIFAR dataset')
 
         global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
 
+        print('cifar check 1')
         net = PreActResNet18().to(DEVICE)
         # net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
         net = torch.nn.DataParallel(net).to(DEVICE)
+
+        print('cifar check 2')
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
@@ -315,11 +325,15 @@ def main():
             optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
         lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [75, 90, 95], gamma = 0.1)
 
+        print('cifar check 3')
+
         if args.dataset == 'cifar':
             ds_train, ds_val, sp_train = Cifar.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
         else:
             ds_train, ds_val, sp_train = Cifar_EXT.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
         es =(8.0, 10)
+
+        print('done selecting cifar')
 
     elif args.dataset == 'imagenet':
         print('using IMAGENET')
@@ -347,12 +361,16 @@ def main():
     # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
     #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
 
+
+    print('warmup starts')
     for epoch in range(n_warm_up_epochs:=5):
     #
         descrip_str = 'Warmup:{}/{}'.format(epoch, n_warm_up_epochs)
         train(net, ds_train, optimizer, criterion, DEVICE,
               descrip_str, es, fast=args.fast, lr_scheduler=warm_up_lr_lchedule, warmup=True)
 
+
+    print('training starts')
     for epoch in range(num_epochs):
 
         sp_train.set_epoch(epoch)
@@ -377,7 +395,14 @@ def main():
             save_checkpoint(epoch, net, optimizer, lr_scheduler,
                             file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
 
+    print('training done')
+    print('eval starts')
+
     eval(net, ds_val, DEVICE, es)
+
+    #torch_profile.stop()
+    wandb.save('./tb-log')
+
     wandb.finish()
 
 if __name__ == "__main__":
