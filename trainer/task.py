@@ -1,3 +1,4 @@
+import glob
 import json
 import time
 import logging
@@ -19,9 +20,8 @@ from trainer.dat.lamb import Lamb
 from trainer.dat.helpers import send_telegram_message
 
 import wandb
-from trainer.wandb_api import API_KEY
 
-from torch.profiler import profile, ProfilerActivity
+from torch.profiler import profile, record_function, ProfilerActivity
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool, 
@@ -38,6 +38,8 @@ parser.add_argument('--dist-backend', default='gloo', type=str,
                     help='distributed backend')
 parser.add_argument('--batch-size', default=2048, type=int,
                     help='batch size')
+parser.add_argument('--warmup-epochs', default=5, type=int, 
+                    help='number of warmup epochs')
 parser.add_argument('--num-epochs', default=200, type=int,
                     help='total training epoch')
 parser.add_argument('--eval-epochs', default=10, type=int,
@@ -80,28 +82,7 @@ def distributed(param, rank, size, DEVICE):
             tmp += qt.dequantize(q, norm)
         param.grad = tmp.to(DEVICE)
     else:
-        start = time.perf_counter()
-        start_msg = f'COM_LOG: START at {start}'
-        timing_logger.info(start_msg)
-        print(start_msg)
-        dist.barrier()
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-
-        start_event.record()
         dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
-        end_event.record()
-
-        dist.barrier()
-
-        torch.cuda.synchronize()
-        elapsed_time = start_event.elapsed_time(end_event)
-        end_msg1 = f'COM_LOG: END at {time.perf_counter()} delta: {time.perf_counter() - start}'
-        print(end_msg1)
-        timing_logger.info(end_msg1)
-        end_msg2 = f'COM_LOG: Communication time (ms): {elapsed_time}'
-        print(end_msg2)
-        timing_logger.info(end_msg2)
 
     param.grad.data /= float(size)
 def fgsm(gradz, step_size):
@@ -131,49 +112,65 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
     if not fast:
         at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step, DEVICE=DEVICE)
         for i, (data, label) in enumerate(pbar):
-            if i == 0:
-                for param in net.parameters():
-                    dist.broadcast(param.data, 0)
-            data = data.to(DEVICE)
-            label = label.to(DEVICE)
+
+            with record_function("broadcast"):
+                if i == 0:
+                    for param in net.parameters():
+                        dist.broadcast(param.data, 0)
+
+            with record_function("data_to_device"):
+                data = data.to(DEVICE)
+                label = label.to(DEVICE)
 
             optimizer.zero_grad()
-
             pbar_dic = OrderedDict()
 
+            with record_function("adv_attack"):
+                adv_inp = at.attack(net, data, label)
+                optimizer.zero_grad()
+                net.train()
 
-            adv_inp = at.attack(net, data, label)
-            optimizer.zero_grad()
-            net.train()
-            pred = net(adv_inp)
-            loss = criterion(pred, label)
+            with record_function("adv_forward"):
+                pred = net(adv_inp)
 
-            acc = torch_accuracy(pred, label, (1,))
-            advacc = acc[0].item()
-            advloss = loss.item()
-            (loss * 1.0).backward()
+            with record_function("adv_loss"):
+                loss = criterion(pred, label)
+                acc = torch_accuracy(pred, label, (1,))
+                advacc = acc[0].item()
+                advloss = loss.item()
 
+            with record_function("adv_backward"):
+                (loss * 1.0).backward()
 
-            pred = net(data)
+            with record_function("clean_forward"):
+                pred = net(data)
 
-            loss = criterion(pred, label)
-            loss.backward()
+            with record_function("clean_loss"):
+                loss = criterion(pred, label)
+            
+            with record_function("clean_backward"):
+                loss.backward()
+            
+            with record_function("distributed"):
+                for param in net.parameters():
+                    distributed(param, rank, size, DEVICE)
 
-            for param in net.parameters():
-                distributed(param, rank, size, DEVICE)
+            with record_function("clean_optimizer_step"):
+                optimizer.step()
+                if warmup:
+                        lr_scheduler.step()
+    
+            with record_function("clean_loss"):
+                acc = torch_accuracy(pred, label, (1,))
+                cleanacc = acc[0].item()
+                cleanloss = loss.item()
 
-            optimizer.step()
-            if warmup:
-                    lr_scheduler.step()
-            acc = torch_accuracy(pred, label, (1,))
-            cleanacc = acc[0].item()
-            cleanloss = loss.item()
             metrics = {
                 f"{descrip}/clean_acc": cleanacc,
                 f"{descrip}/clean_loss": cleanloss,
                 f"{descrip}/adv_acc": advacc,
                 f"{descrip}/adv_loss": advloss,
-                f"{descrip}/lr": lr_scheduler.get_lr()[0],
+                f"{descrip}/lr": lr_scheduler.get_last_lr()[0],
                 f"{descrip}/epoch": int(epoch),
                 f"{descrip}/total_epoch": int(total_epoch),
                 f"{descrip}/rank": rank,
@@ -185,7 +182,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
             pbar_dic['standard test loss'] = '{:.2f}'.format(cleanloss)
             pbar_dic['robust acc'] = '{:.2f}'.format(advacc)
             pbar_dic['robust loss'] = '{:.2f}'.format(advloss)
-            pbar_dic['lr'] = lr_scheduler.get_lr()[0]
+            pbar_dic['lr'] = lr_scheduler.get_last_lr()[0]
             pbar.set_postfix(pbar_dic)
     else:
         global global_noise_data
@@ -294,116 +291,138 @@ def main():
 
         group_name = f'{args.machine_type}_{args.world_size}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
 
-    wandb.login(key=API_KEY)
-    wandb.init(project="sdml-dat", group=group_name, name=args.task_name, config=args, sync_tensorboard=True)
+    wandb.login(key=os.environ['WANDB_API_KEY'])
+    with wandb.init(entity="sdml-dat", project="sdml-dat", group=group_name, name=args.task_name, config=args, sync_tensorboard=True) as wandb_run:
 
-    on_trace_ready = torch.profiler.tensorboard_trace_handler('./tb-log')
-    torch_profile=profile(with_stack=True, on_trace_ready=on_trace_ready,activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])
-    torch_profile.start()
+        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
+        batch_size = args.batch_size
+        num_epochs = args.num_epochs
+        eval_epochs = args.eval_epochs
+        criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
+        global global_noise_data
+        if args.dataset == 'cifar' or args.dataset == 'cifarext':
+            print('using CIFAR dataset')
 
-    dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
-    batch_size = args.batch_size
-    num_epochs = args.num_epochs
-    eval_epochs = args.eval_epochs
-    criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
-    global global_noise_data
-    if args.dataset == 'cifar' or args.dataset == 'cifarext':
-        print('using CIFAR dataset')
+            global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
 
-        global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
+            print('cifar check 1')
+            net = PreActResNet18().to(DEVICE)
+            net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+            # net = torch.nn.DataParallel(net).to(DEVICE)
 
-        print('cifar check 1')
-        net = PreActResNet18().to(DEVICE)
-        # net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
-        net = torch.nn.DataParallel(net).to(DEVICE)
+            print('cifar check 2')
 
-        print('cifar check 2')
-
-        if args.wolalr:
-            optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-        else:
-            optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
-        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [75, 90, 95], gamma = 0.1)
-
-        print('cifar check 3')
-
-        if args.dataset == 'cifar':
-            ds_train, ds_val, sp_train = Cifar.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
-        else:
-            ds_train, ds_val, sp_train = Cifar_EXT.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
-        es =(8.0, 10)
-
-        print('done selecting cifar')
-
-    elif args.dataset == 'imagenet':
-        print('using IMAGENET')
-        global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
-
-        net = resnet50().to(DEVICE)
-        # net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
-        net = torch.nn.DataParallel(net).to(DEVICE)
-
-        if args.wolalr:
-            optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
-        else:
-            optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
-        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 25, 28], gamma=0.1)
-
-        ds_train, ds_val, sp_train = ImageNet.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
-        es = (2.0, 4)
-    
-    lr_steps = 5 * len(ds_train)
-    print('lr_step:{}'.format(lr_steps))
-    lambda1 = lambda step: (step+1) / lr_steps
-
-    warm_up_lr_lchedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
-    
-    # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
-    #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
-
-
-    print('warmup starts')
-    for epoch in range(n_warm_up_epochs:=5):
-    #
-        descrip_str = 'Warmup:{}/{}'.format(epoch, n_warm_up_epochs)
-        train(net, ds_train, optimizer, criterion, DEVICE,
-              descrip_str, es, fast=args.fast, lr_scheduler=warm_up_lr_lchedule, warmup=True)
-
-
-    print('training starts')
-    for epoch in range(num_epochs):
-
-        sp_train.set_epoch(epoch)
-
-        descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
-        train(net, ds_train, optimizer, criterion, DEVICE,
-              descrip_str, es, fast=args.fast, lr_scheduler=lr_scheduler)
-
-        lr_scheduler.step()
-
-        if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
-            clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
-            message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
-            if send_telegram_message(message=message):
-                print('successfully sent Telegram message!')
+            if args.wolalr:
+                optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
             else:
-                print('error sending Telegram message!')
+                optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
+            lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [75, 90, 95], gamma = 0.1)
 
-        if args.rank == 0 and (epoch+1) % 10 == 0:
-            if not os.path.exists(args.output_dir):
-                os.mkdir(args.output_dir)
-            save_checkpoint(epoch, net, optimizer, lr_scheduler,
-                            file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
+            print('cifar check 3')
 
-    print('training done')
-    print('eval starts')
+            if args.dataset == 'cifar':
+                ds_train, ds_val, sp_train = Cifar.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
+            else:
+                ds_train, ds_val, sp_train = Cifar_EXT.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
+            es =(8.0, 10)
 
-    eval(net, ds_val, DEVICE, es)
+            print('done selecting cifar')
 
-    #torch_profile.stop()
-    wandb.save('./tb-log')
+        elif args.dataset == 'imagenet':
+            print('using IMAGENET')
+            global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
 
-    wandb.finish()
+            net = resnet50().to(DEVICE)
+            net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+            # net = torch.nn.DataParallel(net).to(DEVICE)
+
+            if args.wolalr:
+                optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
+            else:
+                optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
+            lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 25, 28], gamma=0.1)
+
+            ds_train, ds_val, sp_train = ImageNet.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
+            es = (2.0, 4)
+        
+        lr_steps = 5 * len(ds_train)
+        print('lr_step:{}'.format(lr_steps))
+        lambda1 = lambda step: (step+1) / lr_steps
+
+        warm_up_lr_lchedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
+        
+        # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
+        #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
+
+        print('warmup starts')
+
+        profiler_dir = f'{args.output_dir}profiler_logs/{group_name}'
+        os.makedirs(profiler_dir, exist_ok=True)
+        schedule = torch.profiler.schedule(wait=0, warmup=0, active=1)
+        on_trace_ready = torch.profiler.tensorboard_trace_handler(profiler_dir, worker_name=args.task_name)
+        
+        max_retries = 60
+        retry_delay = 2  # seconds
+        min_size_mb = 10  # Minimum file size in MB
+        min_size_bytes = min_size_mb * 1024 * 1024  # Convert MB to bytes
+        with profile(schedule=schedule, on_trace_ready=on_trace_ready, activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+
+            for epoch in range(args.warmup_epochs):
+                descrip_str = 'Warmup:{}/{}'.format(epoch, args.warmup_epochs)
+                train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast, lr_scheduler=warm_up_lr_lchedule, warmup=True)
+                
+                prof.step()
+
+        profile_art = wandb.Artifact(f"{args.task_name}-trace", type="profile")
+        for retry_iter in range(max_retries):
+            print('trying:', retry_iter, glob.glob(f'{args.output_dir}profiler_logs/{group_name}/**', recursive=True))
+            file_paths = glob.glob(f'{profiler_dir}/{args.task_name}.*.pt.trace.json')
+            print('file_path:', file_paths)
+            if file_paths:
+                file_path = file_paths[0]
+                file_size = os.path.getsize(file_path)
+                if file_size >= min_size_bytes:
+                    print('Found profile file:', file_path)
+                    profile_art.add_file(file_path, name=f"{args.task_name}-trace.json")
+                    profile_art.save()
+                    wandb_run.log_artifact(profile_art)
+                    print('successfully logged profile artifact!')
+                    break
+                else:
+                    print(f"File size {file_size / (1024 * 1024)}MB is less than the minimum required size of {min_size_mb}MB.")
+            time.sleep(retry_delay)
+
+        print('training starts')
+        for epoch in range(num_epochs):
+
+            sp_train.set_epoch(epoch)
+
+            descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
+            train(net, ds_train, optimizer, criterion, DEVICE,
+                descrip_str, es, fast=args.fast, lr_scheduler=lr_scheduler)
+
+            lr_scheduler.step()
+
+            if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
+                clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
+                message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
+                if send_telegram_message(message=message):
+                    print('successfully sent Telegram message!')
+                else:
+                    print('error sending Telegram message!')
+
+            if args.rank == 0 and (epoch+1) % 10 == 0:
+                if not os.path.exists(args.output_dir):
+                    os.mkdir(args.output_dir)
+                save_checkpoint(epoch, net, optimizer, lr_scheduler,
+                                file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
+
+        print('training done')
+        print('eval starts')
+
+        eval(net, ds_val, DEVICE, es)
+
+        wandb.finish()
 
 if __name__ == "__main__":
     main()
