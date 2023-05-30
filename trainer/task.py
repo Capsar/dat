@@ -21,7 +21,7 @@ from trainer.dat.helpers import send_telegram_message
 
 import wandb
 
-from torch.profiler import profile, ProfilerActivity
+from torch.profiler import profile, record_function, ProfilerActivity
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool, 
