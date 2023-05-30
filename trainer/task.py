@@ -21,7 +21,7 @@ from trainer.dat.helpers import send_telegram_message
 
 import wandb
 
-from torch.profiler import profile, record_function, ProfilerActivity
+from torch.profiler import profile, ProfilerActivity
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool, 
@@ -56,14 +56,6 @@ parser.add_argument('--output-dir', default='saved_models', type=str, help='outp
 parser.add_argument('--group_surfix', default='timestamp', type=str, help='group name for wandb logging')
 parser.add_argument('--machine_type', default='local', type=str, help='machine type for wandb logging')
 parser.add_argument('--accelerator_type', default='cpu', type=str, help='accelerator type for wandb logging')
-
-timing_logger = logging.getLogger('timing_logger')
-timing_logger.setLevel(logging.INFO)
-file_handler = logging.FileHandler('/gcs/dat-project-bucket/log/timing.log')
-file_handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-timing_logger.addHandler(file_handler)
 
 qt = RandomQuantizer()
 def distributed(param, rank, size, DEVICE):
@@ -123,7 +115,6 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
                 label = label.to(DEVICE)
 
             optimizer.zero_grad()
-            pbar_dic = OrderedDict()
 
             with record_function("adv_attack"):
                 adv_inp = at.attack(net, data, label)
@@ -178,6 +169,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
                 f"{descrip}/batch_nr": i,
             }
             wandb.log(metrics)
+            pbar_dic = OrderedDict()
             pbar_dic['standard test acc'] = '{:.2f}'.format(cleanacc)
             pbar_dic['standard test loss'] = '{:.2f}'.format(cleanloss)
             pbar_dic['robust acc'] = '{:.2f}'.format(advacc)
@@ -236,7 +228,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
 
 def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
     net.eval()
-    pbar = tqdm(data_loader)
+    pbar = tqdm(data_loader, file=sys.stdout)
     clean_accuracy = AvgMeter()
     adv_accuracy = AvgMeter()
 
@@ -311,7 +303,6 @@ def main():
             # net = torch.nn.DataParallel(net).to(DEVICE)
 
             print('cifar check 2')
-
             if args.wolalr:
                 optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
             else:
@@ -319,7 +310,6 @@ def main():
             lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [75, 90, 95], gamma = 0.1)
 
             print('cifar check 3')
-
             if args.dataset == 'cifar':
                 ds_train, ds_val, sp_train = Cifar.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
             else:
@@ -348,74 +338,69 @@ def main():
         lr_steps = 5 * len(ds_train)
         print('lr_step:{}'.format(lr_steps))
         lambda1 = lambda step: (step+1) / lr_steps
-
         warm_up_lr_lchedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
         
         # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
         #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
 
         print('warmup starts')
-
         profiler_dir = f'{args.output_dir}profiler_logs/{group_name}'
         os.makedirs(profiler_dir, exist_ok=True)
-        schedule = torch.profiler.schedule(wait=0, warmup=0, active=1)
+        schedule = torch.profiler.schedule(wait=0, warmup=args.warmup_epochs, active=num_epochs)
         on_trace_ready = torch.profiler.tensorboard_trace_handler(profiler_dir, worker_name=args.task_name)
         
         max_retries = 60
         retry_delay = 2  # seconds
         min_size_mb = 10  # Minimum file size in MB
         min_size_bytes = min_size_mb * 1024 * 1024  # Convert MB to bytes
-        with profile(schedule=schedule, on_trace_ready=on_trace_ready, activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+        with profile(schedule=schedule, on_trace_ready=on_trace_ready, activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
+                     record_shapes=False, profile_memory=False, with_stack=False, with_flops=False, with_modules=False) as prof:
 
             for epoch in range(args.warmup_epochs):
                 descrip_str = 'Warmup:{}/{}'.format(epoch, args.warmup_epochs)
                 train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast, lr_scheduler=warm_up_lr_lchedule, warmup=True)
-                
                 prof.step()
 
-        profile_art = wandb.Artifact(f"{args.task_name}-trace", type="profile")
-        for retry_iter in range(max_retries):
-            print('trying:', retry_iter, glob.glob(f'{args.output_dir}profiler_logs/{group_name}/**', recursive=True))
-            file_paths = glob.glob(f'{profiler_dir}/{args.task_name}.*.pt.trace.json')
-            print('file_path:', file_paths)
-            if file_paths:
-                file_path = file_paths[0]
-                file_size = os.path.getsize(file_path)
-                if file_size >= min_size_bytes:
-                    print('Found profile file:', file_path)
-                    profile_art.add_file(file_path, name=f"{args.task_name}-trace.json")
-                    profile_art.save()
-                    wandb_run.log_artifact(profile_art)
-                    print('successfully logged profile artifact!')
-                    break
-                else:
-                    print(f"File size {file_size / (1024 * 1024)}MB is less than the minimum required size of {min_size_mb}MB.")
-            time.sleep(retry_delay)
+        # profile_art = wandb.Artifact(f"{args.task_name}-trace", type="profile")
+        # for retry_iter in range(max_retries):
+        #     print('trying:', retry_iter, glob.glob(f'{args.output_dir}profiler_logs/{group_name}/**', recursive=True))
+        #     file_paths = glob.glob(f'{profiler_dir}/{args.task_name}.*.pt.trace.json')
+        #     print('file_path:', file_paths)
+        #     if file_paths:
+        #         file_path = file_paths[0]
+        #         file_size = os.path.getsize(file_path)
+        #         if file_size >= min_size_bytes:
+        #             print('Found profile file:', file_path)
+        #             profile_art.add_file(file_path, name=f"{args.task_name}-trace.json")
+        #             profile_art.save()
+        #             wandb_run.log_artifact(profile_art)
+        #             print('successfully logged profile artifact!')
+        #             break
+        #         else:
+        #             print(f"File size {file_size / (1024 * 1024)}MB is less than the minimum required size of {min_size_mb}MB.")
+        #     time.sleep(retry_delay)
 
-        print('training starts')
-        for epoch in range(num_epochs):
+            print('training starts')
+            for epoch in range(num_epochs):
 
-            sp_train.set_epoch(epoch)
+                sp_train.set_epoch(epoch)
+                descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
+                train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast, lr_scheduler=lr_scheduler)
+                lr_scheduler.step()
+                prof.step()
 
-            descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
-            train(net, ds_train, optimizer, criterion, DEVICE,
-                descrip_str, es, fast=args.fast, lr_scheduler=lr_scheduler)
+                if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
+                    clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
+                    message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
+                    if send_telegram_message(message=message):
+                        print('successfully sent Telegram message!')
+                    else:
+                        print('error sending Telegram message!')
 
-            lr_scheduler.step()
-
-            if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
-                clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
-                message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
-                if send_telegram_message(message=message):
-                    print('successfully sent Telegram message!')
-                else:
-                    print('error sending Telegram message!')
-
-            if args.rank == 0 and (epoch+1) % 10 == 0:
-                if not os.path.exists(args.output_dir):
-                    os.mkdir(args.output_dir)
-                save_checkpoint(epoch, net, optimizer, lr_scheduler,
-                                file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
+                if args.rank == 0 and (epoch+1) % 10 == 0:
+                    if not os.path.exists(args.output_dir):
+                        os.mkdir(args.output_dir)
+                    save_checkpoint(epoch, net, optimizer, lr_scheduler, file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
 
         print('training done')
         print('eval starts')
