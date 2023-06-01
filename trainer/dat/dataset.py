@@ -94,13 +94,13 @@ class Cifar_EXT:
 
         train_sampler = torch.utils.data.distributed.DistributedSampler(trainset, world_size, rank, shuffle=True)
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False,
-                                                  sampler=train_sampler)
+                                                  sampler=train_sampler, pin_memory=True)
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
         ])
         testset = torchvision.datasets.CIFAR10(root=root, train=False, download=True, transform=transform_test)
-        testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=4)
+        testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
         return trainloader, testloader, train_sampler
 
 

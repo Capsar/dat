@@ -6,6 +6,7 @@ import sys
 import torch
 import torch.distributed as dist
 import argparse
+from datetime import datetime
 from tqdm import tqdm
 import os
 from collections import OrderedDict
@@ -264,6 +265,11 @@ def main():
     print('start')
     args = parser.parse_args()
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    available_gpus = [torch.cuda.device(i) for i in range(torch.cuda.device_count())]
+    for gpu in available_gpus:
+        print(f'GPU: {gpu}')
+
     args.device = DEVICE
     group_name = f'T_{args.group_surfix}'
     #send_telegram_message(message=f'Starting main() in task.py with args: {args}')
@@ -390,12 +396,17 @@ def main():
                 prof.step()
 
                 if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
+                    print(f'Starting evaluation: {datetime.now()}')
+                    start = time.perf_counter()
                     clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
                     message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
                     if send_telegram_message(message=message):
                         print('successfully sent Telegram message!')
                     else:
                         print('error sending Telegram message!')
+                    delta = time.perf_counter() - start
+                    print(f'Ending evaluation: {datetime.now()}')
+                    print(f'Done in {delta:.4f}s')
 
                 if args.rank == 0 and (epoch+1) % 10 == 0:
                     if not os.path.exists(args.output_dir):
