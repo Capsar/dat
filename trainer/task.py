@@ -28,9 +28,9 @@ parser.add_argument('--gcloud', default=False, type=bool,
                     help='whether the code is running on gcloud')
 parser.add_argument('--dataset', default='cifar', choices=['cifar', 'cifarext', 'imagenet'],
                     help='dataset cifar or imagenet')
-parser.add_argument('--world-size', default=-1, type=int,
+parser.add_argument('--world-size', default=1, type=int,
                     help='number of nodes for distributed training')
-parser.add_argument('--rank', default=-1, type=int,
+parser.add_argument('--rank', default=0, type=int,
                     help='node rank for distributed training')
 parser.add_argument('--dist-url', type=str,
                     help='url used to set up distributed training')
@@ -267,26 +267,38 @@ def main():
     args.device = DEVICE
     group_name = f'T_{args.group_surfix}'
     #send_telegram_message(message=f'Starting main() in task.py with args: {args}')
+    args.accelerator_count = 0
+    if torch.cuda.is_available():
+        args.accelerator_count = torch.cuda.device_count()
     if args.gcloud:
         # Get the rank and world size from the environment variables
         args.rank = int(os.environ['RANK'])
-        args.world_size = int(os.environ['WORLD_SIZE'])
+        args.world_size = int(os.environ['WORLD_SIZE']) * args.accelerator_count
         args.dist_url = 'env://'
-        print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], os.environ['RANK'], os.environ['WORLD_SIZE'])
-        cluster_spec = json.loads(os.environ['CLUSTER_SPEC'])
-        task_type = cluster_spec["task"]["type"]
-        task_index = cluster_spec["task"]["index"]
-        args.task_name = f"{task_type}-{task_index}-R{args.rank}"
-        args.accelerator_count = 0
-        if torch.cuda.is_available():
-            args.accelerator_count = torch.cuda.device_count()
+        print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], args.rank, args.world_size)
 
-        group_name = f'{args.machine_type}_{args.world_size}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
+    group_name = f'{args.machine_type}_{args.world_size}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
+      # Use torch.multiprocessing.spawn to launch distributed processes
+    if torch.cuda.is_available():
+        torch.multiprocessing.spawn(main_worker,
+            args = (group_name, args),
+            nprocs = args.accelerator_count,
+            join = True)
+    else:
+        # CPU ONLY
+        pass
 
+def main_worker(local_rank, group_name, args):
+    DEVICE = f'cuda:{local_rank}'
+    rank = int(os.environ["RANK"]) * args.accelerator_count + local_rank
+    cluster_spec = json.loads(os.environ['CLUSTER_SPEC'])
+    task_type = cluster_spec["task"]["type"]
+    task_index = cluster_spec["task"]["index"]
+    args.task_name = f"{task_type}-{task_index}-DR{int(os.environ['RANK'])}-LR{local_rank}-R{rank}"
     wandb.login(key=os.environ['WANDB_API_KEY'])
     with wandb.init(entity="sdml-dat", project="sdml-dat", group=group_name, name=args.task_name, config=args, sync_tensorboard=True) as wandb_run:
-
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
+        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=rank)
+        torch.cuda.set_device(local_rank)
         batch_size = args.batch_size
         num_epochs = args.num_epochs
         eval_epochs = args.eval_epochs
@@ -299,7 +311,7 @@ def main():
 
             print('cifar check 1')
             net = PreActResNet18().to(DEVICE)
-            net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+            net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
             # net = torch.nn.DataParallel(net).to(DEVICE)
 
             print('cifar check 2')
@@ -344,22 +356,22 @@ def main():
         #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
 
         print('warmup starts')
-        profiler_dir = f'{args.output_dir}profiler_logs/{group_name}'
-        os.makedirs(profiler_dir, exist_ok=True)
-        schedule = torch.profiler.schedule(wait=0, warmup=args.warmup_epochs, active=num_epochs)
-        on_trace_ready = torch.profiler.tensorboard_trace_handler(profiler_dir, worker_name=args.task_name)
+        # profiler_dir = f'{args.output_dir}profiler_logs/{group_name}'
+        # os.makedirs(profiler_dir, exist_ok=True)
+        # schedule = torch.profiler.schedule(wait=0, warmup=args.warmup_epochs, active=num_epochs)
+        # on_trace_ready = torch.profiler.tensorboard_trace_handler(profiler_dir, worker_name=args.task_name)
         
-        max_retries = 60
-        retry_delay = 2  # seconds
-        min_size_mb = 10  # Minimum file size in MB
-        min_size_bytes = min_size_mb * 1024 * 1024  # Convert MB to bytes
-        with profile(schedule=schedule, on_trace_ready=on_trace_ready, activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
-                     record_shapes=False, profile_memory=False, with_stack=False, with_flops=False, with_modules=False) as prof:
+        # max_retries = 60
+        # retry_delay = 2  # seconds
+        # min_size_mb = 10  # Minimum file size in MB
+        # min_size_bytes = min_size_mb * 1024 * 1024  # Convert MB to bytes
+        # prof = profile(schedule=schedule, on_trace_ready=on_trace_ready, activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
+        #              record_shapes=False, profile_memory=False, with_stack=False, with_flops=False, with_modules=False)
 
-            for epoch in range(args.warmup_epochs):
-                descrip_str = 'Warmup:{}/{}'.format(epoch, args.warmup_epochs)
-                train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast, lr_scheduler=warm_up_lr_lchedule, warmup=True)
-                prof.step()
+        for epoch in range(args.warmup_epochs):
+            descrip_str = 'Warmup:{}/{}'.format(epoch, args.warmup_epochs)
+            train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast, lr_scheduler=warm_up_lr_lchedule, warmup=True)
+            # prof.step()
 
         # profile_art = wandb.Artifact(f"{args.task_name}-trace", type="profile")
         # for retry_iter in range(max_retries):
@@ -380,27 +392,29 @@ def main():
         #             print(f"File size {file_size / (1024 * 1024)}MB is less than the minimum required size of {min_size_mb}MB.")
         #     time.sleep(retry_delay)
 
-            print('training starts')
-            for epoch in range(num_epochs):
+        print('training starts')
+        for epoch in range(num_epochs):
 
-                sp_train.set_epoch(epoch)
-                descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
-                train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast, lr_scheduler=lr_scheduler)
-                lr_scheduler.step()
-                prof.step()
+            sp_train.set_epoch(epoch)
+            descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
+            train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast, lr_scheduler=lr_scheduler)
+            lr_scheduler.step()
+            # prof.step()
 
-                if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
-                    clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
-                    message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
-                    if send_telegram_message(message=message):
-                        print('successfully sent Telegram message!')
-                    else:
-                        print('error sending Telegram message!')
+            if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
+                clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
+                message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
+                if send_telegram_message(message=message):
+                    print('successfully sent Telegram message!')
+                else:
+                    print('error sending Telegram message!')
 
-                if args.rank == 0 and (epoch+1) % 10 == 0:
-                    if not os.path.exists(args.output_dir):
-                        os.mkdir(args.output_dir)
-                    save_checkpoint(epoch, net, optimizer, lr_scheduler, file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
+            if args.rank == 0 and (epoch+1) % 10 == 0:
+                if not os.path.exists(args.output_dir):
+                    os.mkdir(args.output_dir)
+                save_checkpoint(epoch, net, optimizer, lr_scheduler, file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
+
+        # prof.stop()
 
         print('training done')
         print('eval starts')
