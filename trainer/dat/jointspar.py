@@ -25,7 +25,7 @@ class JointSpar:
         print(f'Current p: {self.p[epoch, :]}')
         sample = torch.rand(self.num_layers)
         print(f'Pytorch sample: {sample}')
-        self.Z[epoch, :] = torch.where(sample < self.p[epoch, :], torch.tensor(0.0), torch.tensor(1.0))
+        self.Z[epoch, :] = torch.where(sample < self.p[epoch, :], torch.tensor(1.0), torch.tensor(0.0))
         print(f'{epoch}. Z: {self.Z[epoch, :]}')
         self.S[epoch] = torch.nonzero(self.Z[epoch, :] == 1.0).flatten().tolist()
         print(f'{epoch}. S: {self.S[epoch]}')
@@ -61,6 +61,7 @@ class JointSpar:
             if self.Z[epoch,d]!=0:
                 g=torch.zeros_like(grads)
                 g[d]=grads[d]
+                print(f'g: {g}')
                 l1=-torch.pow(g.norm(),2)/torch.pow(self.p[epoch,d],2)
                 l2= torch.pow(self.L,2)/torch.pow(self.p_min,2)
                 l[d]=l1+l2
@@ -69,8 +70,11 @@ class JointSpar:
             
             w[d]=self.p[epoch,d]*torch.exp((-learning_rate*l[d])/self.p[epoch,d])
 
+        print(f'L: {self.L}')
+        print(f'l: {l}')
+        print(f'w: {w}')
         # line 10: to bring it back to a probablility distribution but with a sum of sparsity budget 
-        self.p[next]=(w*self.sparsity)/torch.sum(w)
+        self.p[next]=(w/torch.sum(w))*self.sparsity
 
 
 if __name__ == '__main__':
@@ -78,22 +82,29 @@ if __name__ == '__main__':
 
     print('\nEpoch 0\n')
     jointspar.get_active_set(epoch=0)
-    grads = torch.tensor([0.9, 0.1, 0.3, 0.4])
+    grads = torch.tensor([0.2, 0.1, 0.3, 0.4])
     print(f'Grads: {grads}')
     sparsed=jointspar.sparsify_gradient(epoch=0, grads=grads)
-    jointspar.upate_p(epoch=0, grads=grads, learning_rate=0.1)
+    jointspar.upate_p(epoch=0, grads=grads, learning_rate=0.01)
 
     print('\nEpoch 1\n')
     jointspar.get_active_set(epoch=1)
     grads = torch.tensor([0.1, 0.2, 0.3, 0.4])
     print(f'Grads: {grads}')
     sparsed=jointspar.sparsify_gradient(epoch=1, grads=grads)
-    jointspar.upate_p(epoch=1, grads=grads, learning_rate=0.1)
+    jointspar.upate_p(epoch=1, grads=grads, learning_rate=0.01)
 
     print('\nEpoch 2\n')
     jointspar.get_active_set(epoch=2)
-    grads = torch.tensor([1.3, 0.2, 0.2, 0.8])
+    grads = torch.tensor([0.3, 0.2, 0.2, 0.8])
     print(f'Grads: {grads}')
     sparsed=jointspar.sparsify_gradient(epoch=2, grads=grads)
-    jointspar.upate_p(epoch=2, grads=grads, learning_rate=0.1)
+    jointspar.upate_p(epoch=2, grads=grads, learning_rate=0.01)
     
+    for i in range(3, 9):
+        print(f'\nEpoch {i}\n')
+        jointspar.get_active_set(epoch=i)
+        grads = torch.rand(4)
+        print(f'Grads: {grads}')
+        sparsed=jointspar.sparsify_gradient(epoch=i, grads=grads)
+        jointspar.upate_p(epoch=i, grads=grads, learning_rate=0.01)
