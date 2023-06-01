@@ -95,7 +95,6 @@ def train(net, data_loader, optimizer,
 
             pbar_dic = OrderedDict()
 
-
             adv_inp = at.attack(net, data, label)
             optimizer.zero_grad()
             net.train()
