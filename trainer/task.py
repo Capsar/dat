@@ -226,7 +226,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
             pbar.set_postfix(pbar_dic)
 
 
-def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
+def eval(net, data_loader, DEVICE, es=(8.0, 20)):
     net.eval()
     pbar = tqdm(data_loader, file=sys.stdout)
     clean_accuracy = AvgMeter()
@@ -234,7 +234,7 @@ def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
 
     pbar.set_description('Evaluating')
     eps, step = es
-    at_eval = PGD(eps=eps/ 255.0, sigma=2/255.0, nb_iter=step)
+    at_eval = PGD(eps=eps/ 255.0, sigma=2/255.0, nb_iter=step, DEVICE=DEVICE)
     for (data, label) in pbar:
         data = data.to(DEVICE)
         label = label.to(DEVICE)
@@ -252,6 +252,11 @@ def eval(net, data_loader, DEVICE=torch.device('cuda:0'), es=(8.0, 20)):
             acc = torch_accuracy(pred, label, (1,))
             adv_accuracy.update(acc[0].item(), acc[0].size(0))
 
+        metrics = {
+            f"Evaluation/clean_acc": clean_accuracy.mean,
+            f"Evaluation/clean_loss": adv_accuracy.mean,
+        }
+        wandb.log(metrics)
         pbar_dic = OrderedDict()
         pbar_dic['standard test acc'] = '{:.2f}'.format(clean_accuracy.mean)
         pbar_dic['robust acc'] = '{:.2f}'.format(adv_accuracy.mean)
@@ -272,88 +277,83 @@ def main():
         args.accelerator_count = torch.cuda.device_count()
     if args.gcloud:
         # Get the rank and world size from the environment variables
-        args.rank = int(os.environ['RANK'])
-        args.world_size = int(os.environ['WORLD_SIZE']) * args.accelerator_count
         args.dist_url = 'env://'
-        print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], args.rank, args.world_size)
+        print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], int(os.environ['RANK']), int(os.environ['WORLD_SIZE']))
 
-    group_name = f'{args.machine_type}_{args.world_size}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
+    group_name = f'{args.machine_type}_{int(os.environ["WORLD_SIZE"])}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
       # Use torch.multiprocessing.spawn to launch distributed processes
     if torch.cuda.is_available():
-        torch.multiprocessing.spawn(main_worker,
-            args = (group_name, args),
-            nprocs = args.accelerator_count,
-            join = True)
+        torch.multiprocessing.spawn(main_worker, args = (group_name, args), nprocs = args.accelerator_count, join = True)
     else:
         # CPU ONLY
         pass
 
 def main_worker(local_rank, group_name, args):
     DEVICE = f'cuda:{local_rank}'
-    rank = int(os.environ["RANK"]) * args.accelerator_count + local_rank
+    args.rank = int(os.environ['RANK']) * args.accelerator_count + local_rank
+    args.world_size = int(os.environ['WORLD_SIZE']) * args.accelerator_count
     cluster_spec = json.loads(os.environ['CLUSTER_SPEC'])
     task_type = cluster_spec["task"]["type"]
     task_index = cluster_spec["task"]["index"]
-    args.task_name = f"{task_type}-{task_index}-DR{int(os.environ['RANK'])}-LR{local_rank}-R{rank}"
+    args.task_name = f"{task_type}-{task_index}-DR{int(os.environ['RANK'])}-LR{local_rank}-R{args.rank}"
     wandb.login(key=os.environ['WANDB_API_KEY'])
+    dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
+    torch.cuda.set_device(local_rank)
+    batch_size = args.batch_size
+    num_epochs = args.num_epochs
+    eval_epochs = args.eval_epochs
+    criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
+    global global_noise_data
+    if args.dataset == 'cifar' or args.dataset == 'cifarext':
+        print('using CIFAR dataset')
+        global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
+        print('cifar check 1')
+        net = PreActResNet18().to(DEVICE)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
+        # net = torch.nn.DataParallel(net).to(DEVICE)
+
+        print('cifar check 2')
+        if args.wolalr:
+            optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+        else:
+            optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
+        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [75, 90, 95], gamma = 0.1)
+
+        print('cifar check 3')
+        if args.dataset == 'cifar':
+            ds_train, ds_val, sp_train = Cifar.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
+        else:
+            ds_train, ds_val, sp_train = Cifar_EXT.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
+        es =(8.0, 10)
+
+        print('done selecting cifar')
+
+    elif args.dataset == 'imagenet':
+        print('using IMAGENET')
+        global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
+
+        net = resnet50().to(DEVICE)
+        net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+        # net = torch.nn.DataParallel(net).to(DEVICE)
+
+        if args.wolalr:
+            optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
+        else:
+            optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
+        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 25, 28], gamma=0.1)
+
+        ds_train, ds_val, sp_train = ImageNet.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
+        es = (2.0, 4)
+    
+    lr_steps = 5 * len(ds_train)
+    print('lr_step:{}'.format(lr_steps))
+    lambda1 = lambda step: (step+1) / lr_steps
+    warm_up_lr_lchedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
+    
+    # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
+    #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
+    
     with wandb.init(entity="sdml-dat", project="sdml-dat", group=group_name, name=args.task_name, config=args, sync_tensorboard=True) as wandb_run:
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=rank)
-        torch.cuda.set_device(local_rank)
-        batch_size = args.batch_size
-        num_epochs = args.num_epochs
-        eval_epochs = args.eval_epochs
-        criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
-        global global_noise_data
-        if args.dataset == 'cifar' or args.dataset == 'cifarext':
-            print('using CIFAR dataset')
-
-            global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
-
-            print('cifar check 1')
-            net = PreActResNet18().to(DEVICE)
-            net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
-            # net = torch.nn.DataParallel(net).to(DEVICE)
-
-            print('cifar check 2')
-            if args.wolalr:
-                optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-            else:
-                optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
-            lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = [75, 90, 95], gamma = 0.1)
-
-            print('cifar check 3')
-            if args.dataset == 'cifar':
-                ds_train, ds_val, sp_train = Cifar.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
-            else:
-                ds_train, ds_val, sp_train = Cifar_EXT.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
-            es =(8.0, 10)
-
-            print('done selecting cifar')
-
-        elif args.dataset == 'imagenet':
-            print('using IMAGENET')
-            global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
-
-            net = resnet50().to(DEVICE)
-            net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
-            # net = torch.nn.DataParallel(net).to(DEVICE)
-
-            if args.wolalr:
-                optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
-            else:
-                optimizer = Lamb(net.parameters(), lr=args.lr, weight_decay=1e-4, betas=(.9, .999), adam=False)
-            lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 25, 28], gamma=0.1)
-
-            ds_train, ds_val, sp_train = ImageNet.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
-            es = (2.0, 4)
-        
-        lr_steps = 5 * len(ds_train)
-        print('lr_step:{}'.format(lr_steps))
-        lambda1 = lambda step: (step+1) / lr_steps
-        warm_up_lr_lchedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
-        
-        # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
-        #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
 
         print('warmup starts')
         # profiler_dir = f'{args.output_dir}profiler_logs/{group_name}'
