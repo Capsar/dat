@@ -70,33 +70,47 @@ class JointSpar:
 
 
 if __name__ == '__main__':
-    jointspar = JointSpar(num_layers=4, epochs=10, sparsity_budget=3, p_min=0.1)
 
-    print('\nEpoch 0\n')
-    jointspar.get_active_set(epoch=0)
-    grads0 = torch.tensor([0.2, 0.1, 0.3, 0.4])
-    print(f'Grads: {grads0}')
-    sparsified0 = jointspar.sparsify_gradient(epoch=0, grads=grads0)
-    jointspar.update_p(epoch=0, grads=grads0, learning_rate=0.01)
+    import torch
+    from torchvision.datasets import CIFAR10
+    from models import PreActResNet18
 
-    print('\nEpoch 1\n')
-    jointspar.get_active_set(epoch=1)
-    grads1 = torch.tensor([0.1, 0.2, 0.3, 0.4])
-    print(f'Grads: {grads1}')
-    sparsified1 = jointspar.sparsify_gradient(epoch=1, grads=grads1)
-    jointspar.update_p(epoch=1, grads=grads1, learning_rate=0.01)
 
-    print('\nEpoch 2\n')
-    jointspar.get_active_set(epoch=2)
-    grads2 = torch.tensor([0.3, 0.2, 0.2, 0.8])
-    print(f'Grads: {grads2}')
-    sparsified2 = jointspar.sparsify_gradient(epoch=2, grads=grads2)
-    jointspar.update_p(epoch=2, grads=grads2, learning_rate=0.01)
-    
-    for i in range(3, 9):
-        print(f'\nEpoch {i}\n')
-        jointspar.get_active_set(epoch=i)
-        grads_i = torch.rand(4)
-        print(f'Grads: {grads_i}')
-        sparsified_i = jointspar.sparsify_gradient(epoch=i, grads=grads_i)
-        jointspar.update_p(epoch=i, grads=grads_i, learning_rate=0.01)
+    jointspar = JointSpar(num_layers=3, epochs=15, sparsity_budget=2, p_min=0.1)
+
+    model = PreActResNet18()
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    criterion = torch.nn.CrossEntropyLoss()
+
+    trainset = CIFAR10(root='./data', train=True, download=True)
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=64, shuffle=True)
+
+    for epoch in range(jointspar.epochs):
+        jointspar.get_active_set(epoch)
+        for i, data in enumerate(trainloader):
+
+            inputs, labels = data
+            inputs = inputs.view(inputs.shape[0], -1)
+
+            optimizer.zero_grad()
+            
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            
+            jointspar.update_p(epoch, model[0].weight.grad, 0.01)
+            sparsified_grad= jointspar.sparsify_gradient(epoch, model[0].weight.grad)
+
+            model[0].weight.grad= sparsified_grad
+
+            for i in sparsified_grad:
+                if i == 0:
+                    print(f'Freeze layer {i}')
+                
+
+            loss.backward()
+            optimizer.step()
+
+            if i % 100 == 0:
+                print(f'Epoch {epoch}, batch {i}, loss {loss.item()}')
+
