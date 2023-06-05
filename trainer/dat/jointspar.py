@@ -71,8 +71,13 @@ class JointSpar:
         self.p[epoch + 1] = (w / torch.sum(w)) * self.sparsity
 
 
-if __name__ == '__main__':
+def set_grad_enabled_for_layers(model, num_layers, active_layers):
+    for ind in range(num_layers):
+        layer = model.layers[ind]
+        layer.requires_grad_(ind in active_layers)
 
+
+if __name__ == '__main__':
     import torch
     from torchvision.datasets import CIFAR10
     from models import PreActResNet18
@@ -83,17 +88,18 @@ if __name__ == '__main__':
     # - freeze_layers   (freeze layers that are not in the active set)
     # - unfreeze_layers
 
-    epochs = 5
-    batch_size = 2048
+    epochs = 100
+    batch_size = 512
+    num_layers = 10
+    sparsity_budget = 2
+    p_min = 0.1
+    learning_rate = 0.01
+    use_jointspar = False
 
-    jointspar = JointSpar(num_layers=3, epochs=epochs, sparsity_budget=2, p_min=0.1)
-
-    device= torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
+    jointspar = JointSpar(num_layers=num_layers, epochs=epochs, sparsity_budget=sparsity_budget, p_min=p_min)
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = PreActResNet18().to(device)
-
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     criterion = torch.nn.CrossEntropyLoss().to(device)
 
     trainset = CIFAR10(root='./data', train=True, download=True, transform=ToTensor())
@@ -107,28 +113,27 @@ if __name__ == '__main__':
 
     start = time.perf_counter()
     for epoch in range(jointspar.epochs):
-        #S=jointspar.get_active_set(epoch)
+        if use_jointspar:
+            S = jointspar.get_active_set(epoch)
         for i, data in enumerate(trainloader):
-
             inputs, labels = data
             inputs, labels = inputs.to(device), labels.to(device)
-
             optimizer.zero_grad()
             
             outputs = model(inputs)
             loss = criterion(outputs, labels)
-            
-            #jointspar.update_p(epoch, model[0].weight.grad, 0.01)
-            # sparsified_grad= jointspar.sparsify_gradient(epoch, model.layers[0].weight.grad)
-            # model.layers[0].weight.grad= sparsified_grad
-            # for i in sparsified_grad:
-            #     if i == 0:
-            #         print(f'Freeze layer {i}')
-
             losses.append(loss.item())
+
+            if use_jointspar:
+                set_grad_enabled_for_layers(model=model, active_layers=S)
 
             loss.backward()
             optimizer.step()
+
+            if use_jointspar:
+                grads = torch.tensor([l.weight.grad for l in model.layers])
+                sparsified_grads = jointspar.sparsify_gradient(epoch, grads)
+                jointspar.update_p(epoch, sparsified_grads, learning_rate)
 
             if i % 100 == 0:
                 print(f'Epoch {epoch}, batch {i}, loss {loss.item()}')
@@ -151,7 +156,8 @@ if __name__ == '__main__':
         eta = (epochs - (epoch + 1)) * time_per_epoch
         print(f'Epoch {epoch + 1} / {epochs}, accuracy {accuracy * 100:.2f}% ETA: {seconds_to_string(eta)} Time/Epoch: {time_per_epoch:.2f}s')
 
-    file_name = f'./runs/{epochs}epochs_{batch_size}batch.obj'
+    jointspar_suffix = '_jointspar' if use_jointspar else ''
+    file_name = f'./runs/{epochs}epochs_{batch_size}batch{jointspar_suffix}.obj'
     with open(file_name, 'wb') as file:
         pickle.dump([losses, accuracies], file)
 
