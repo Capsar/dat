@@ -19,7 +19,7 @@ class JointSpar:
         self.L = torch.zeros(1)
 
     # Step 2 & 3
-    def get_active_set(self, epoch: int) -> List:
+    def get_active_set(self, epoch: int) -> torch.Tensor:
         print(f'Sparsity budget: {self.sparsity}')
         print(f'p min: {self.p_min}')
         print(f'Current p: {self.p[epoch, :]}')
@@ -40,8 +40,8 @@ class JointSpar:
         
         # 6: construct sparsified gradient
         sparsified_grads = torch.zeros_like(grads)
-        layers_to_sparsify = torch.tensor(self.S[epoch])
-        sparsified_grads[layers_to_sparsify] = grads[layers_to_sparsify]
+        layers_to_compute = torch.tensor(self.S[epoch])
+        sparsified_grads[layers_to_compute] = grads[layers_to_compute]
         print(f'Sparsified grads: {sparsified_grads}')
         return sparsified_grads
     
@@ -74,39 +74,51 @@ if __name__ == '__main__':
     import torch
     from torchvision.datasets import CIFAR10
     from models import PreActResNet18
+    from torchvision.transforms import ToTensor
 
+    #methods for the model to inclue
+    # - get_num_layers
+    # - freeze_layers   (freeze layers that are not in the active set)
+    # - unfreeze_layers 
 
     jointspar = JointSpar(num_layers=3, epochs=15, sparsity_budget=2, p_min=0.1)
 
-    model = PreActResNet18()
+    device= torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+    model = PreActResNet18().to(device)
 
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-    criterion = torch.nn.CrossEntropyLoss()
 
-    trainset = CIFAR10(root='./data', train=True, download=True)
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=64, shuffle=True)
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+
+    trainset = CIFAR10(root='./data', train=True, download=True, transform=ToTensor())
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True)
+
+    testset = CIFAR10(root='./data', train=False, download=True, transform=ToTensor())
+    testloader = torch.utils.data.DataLoader(testset, batch_size=128, shuffle=False)
 
     for epoch in range(jointspar.epochs):
-        jointspar.get_active_set(epoch)
+        S=jointspar.get_active_set(epoch)
         for i, data in enumerate(trainloader):
 
             inputs, labels = data
-            inputs = inputs.view(inputs.shape[0], -1)
+            inputs, labels = inputs.to(device), labels.to(device)
 
             optimizer.zero_grad()
             
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             
-            jointspar.update_p(epoch, model[0].weight.grad, 0.01)
-            sparsified_grad= jointspar.sparsify_gradient(epoch, model[0].weight.grad)
+            #jointspar.update_p(epoch, model[0].weight.grad, 0.01)
 
-            model[0].weight.grad= sparsified_grad
 
-            for i in sparsified_grad:
-                if i == 0:
-                    print(f'Freeze layer {i}')
-                
+            # sparsified_grad= jointspar.sparsify_gradient(epoch, model.layers[0].weight.grad)
+
+            # model.layers[0].weight.grad= sparsified_grad
+
+            # for i in sparsified_grad:
+            #     if i == 0:
+            #         print(f'Freeze layer {i}')
 
             loss.backward()
             optimizer.step()
