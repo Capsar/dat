@@ -8,3 +8,4 @@ venv/
 .idea/
 .env
 trainer/trash/
+/trainer/dat/runs/

@@ -1,7 +1,9 @@
 import time
-from typing import List
-
 import torch
+import pickle
+import matplotlib.pyplot as plt
+
+from utils import seconds_to_string
 
 
 class JointSpar:
@@ -79,9 +81,12 @@ if __name__ == '__main__':
     #methods for the model to inclue
     # - get_num_layers
     # - freeze_layers   (freeze layers that are not in the active set)
-    # - unfreeze_layers 
+    # - unfreeze_layers
 
-    jointspar = JointSpar(num_layers=3, epochs=15, sparsity_budget=2, p_min=0.1)
+    epochs = 5
+    batch_size = 2048
+
+    jointspar = JointSpar(num_layers=3, epochs=epochs, sparsity_budget=2, p_min=0.1)
 
     device= torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -92,16 +97,17 @@ if __name__ == '__main__':
     criterion = torch.nn.CrossEntropyLoss().to(device)
 
     trainset = CIFAR10(root='./data', train=True, download=True, transform=ToTensor())
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=1024, shuffle=True)
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
 
     testset = CIFAR10(root='./data', train=False, download=True, transform=ToTensor())
-    testloader = torch.utils.data.DataLoader(testset, batch_size=1024, shuffle=False)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
 
-    losses= []
-    accuracies= []
+    losses = []
+    accuracies = []
 
+    start = time.perf_counter()
     for epoch in range(jointspar.epochs):
-        S=jointspar.get_active_set(epoch)
+        #S=jointspar.get_active_set(epoch)
         for i, data in enumerate(trainloader):
 
             inputs, labels = data
@@ -139,18 +145,25 @@ if __name__ == '__main__':
                 correct += (predicted == labels).sum().item()
         
         accuracy = correct / total
-        accuracies.append(accuracy)
-        print(f'Epoch {epoch}, accuracy {accuracy}')
+        accuracies.append(accuracy * 100)
+        delta = time.perf_counter() - start
+        time_per_epoch = delta / (epoch + 1)
+        eta = (epochs - (epoch + 1)) * time_per_epoch
+        print(f'Epoch {epoch + 1} / {epochs}, accuracy {accuracy * 100:.2f}% ETA: {seconds_to_string(eta)} Time/Epoch: {time_per_epoch:.2f}s')
 
-
-    import matplotlib.pyplot as plt
+    file_name = f'./runs/{epochs}epochs_{batch_size}batch.obj'
+    with open(file_name, 'wb') as file:
+        pickle.dump([losses, accuracies], file)
 
     plt.plot(losses)
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
     plt.show()
 
     plt.plot(accuracies)
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy (%)')
     plt.show()
 
-    print('Finished Training')
-
-
+    total_time = time.perf_counter() - start
+    print(f'Finished Training in {seconds_to_string(total_time)}')
