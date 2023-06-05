@@ -30,6 +30,9 @@ class JointSpar:
         self.S[epoch] = torch.nonzero(self.Z[epoch, :] == 1.0).flatten().tolist()
         print(f'{epoch}. S: {self.S[epoch]}')
         return self.S[epoch]
+
+    def get_nonactive_set(self, epoch: int) -> List:
+        
     
     # Step 5 & 6 
     def sparsify_gradient(self, epoch: int, grads: torch.Tensor) -> torch.Tensor:
@@ -75,10 +78,14 @@ if __name__ == '__main__':
     from torchvision.datasets import CIFAR10
     from models import PreActResNet18
 
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
+    use_jointspar = False
 
     jointspar = JointSpar(num_layers=3, epochs=15, sparsity_budget=2, p_min=0.1)
 
     model = PreActResNet18()
+    model.to(device)
 
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     criterion = torch.nn.CrossEntropyLoss()
@@ -87,9 +94,9 @@ if __name__ == '__main__':
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=64, shuffle=True)
 
     for epoch in range(jointspar.epochs):
-        jointspar.get_active_set(epoch)
+        if use_jointspar:
+            jointspar.get_active_set(epoch)
         for i, data in enumerate(trainloader):
-
             inputs, labels = data
             inputs = inputs.view(inputs.shape[0], -1)
 
@@ -97,20 +104,18 @@ if __name__ == '__main__':
             
             outputs = model(inputs)
             loss = criterion(outputs, labels)
-            
-            jointspar.update_p(epoch, model[0].weight.grad, 0.01)
-            sparsified_grad= jointspar.sparsify_gradient(epoch, model[0].weight.grad)
 
-            model[0].weight.grad= sparsified_grad
+            if use_jointspar:
+                jointspar.update_p(epoch, model[0].weight.grad, 0.01)
+                sparsified_grad = jointspar.sparsify_gradient(epoch, model[0].weight.grad)
 
-            for i in sparsified_grad:
-                if i == 0:
-                    print(f'Freeze layer {i}')
-                
+                model[0].weight.grad = sparsified_grad
+                for i in sparsified_grad:
+                    if i == 0:
+                        print(f'Freeze layer {i}')
 
             loss.backward()
             optimizer.step()
 
             if i % 100 == 0:
                 print(f'Epoch {epoch}, batch {i}, loss {loss.item()}')
-
