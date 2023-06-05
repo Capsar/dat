@@ -92,10 +92,13 @@ if __name__ == '__main__':
     criterion = torch.nn.CrossEntropyLoss().to(device)
 
     trainset = CIFAR10(root='./data', train=True, download=True, transform=ToTensor())
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True)
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=1024, shuffle=True)
 
     testset = CIFAR10(root='./data', train=False, download=True, transform=ToTensor())
-    testloader = torch.utils.data.DataLoader(testset, batch_size=128, shuffle=False)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=1024, shuffle=False)
+
+    losses= []
+    accuracies= []
 
     for epoch in range(jointspar.epochs):
         S=jointspar.get_active_set(epoch)
@@ -110,19 +113,44 @@ if __name__ == '__main__':
             loss = criterion(outputs, labels)
             
             #jointspar.update_p(epoch, model[0].weight.grad, 0.01)
-
-
             # sparsified_grad= jointspar.sparsify_gradient(epoch, model.layers[0].weight.grad)
-
             # model.layers[0].weight.grad= sparsified_grad
-
             # for i in sparsified_grad:
             #     if i == 0:
             #         print(f'Freeze layer {i}')
+
+            losses.append(loss.item())
 
             loss.backward()
             optimizer.step()
 
             if i % 100 == 0:
                 print(f'Epoch {epoch}, batch {i}, loss {loss.item()}')
+
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for data in testloader:
+                inputs, labels = data
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                _, predicted = torch.max(outputs.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+        
+        accuracy = correct / total
+        accuracies.append(accuracy)
+        print(f'Epoch {epoch}, accuracy {accuracy}')
+
+
+    import matplotlib.pyplot as plt
+
+    plt.plot(losses)
+    plt.show()
+
+    plt.plot(accuracies)
+    plt.show()
+
+    print('Finished Training')
+
 
