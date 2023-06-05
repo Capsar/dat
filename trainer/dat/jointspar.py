@@ -4,6 +4,9 @@ import pickle
 import matplotlib.pyplot as plt
 
 from utils import seconds_to_string
+from torchvision.datasets import CIFAR10
+from models import PreActResNet18, PreActBlock, GlobalpoolFC
+from torchvision.transforms import ToTensor
 
 
 class JointSpar:
@@ -74,27 +77,50 @@ class JointSpar:
 def set_grad_enabled_for_layers(model, num_layers, active_layers):
     for ind in range(num_layers):
         layer = model.layers[ind]
-        layer.requires_grad_(ind in active_layers)
+
+        requires_grad = ind in active_layers
+
+        if isinstance(layer, PreActBlock):
+            layer.bn1.requires_grad_(requires_grad)
+            layer.bn2.requires_grad_(requires_grad)
+            layer.conv1.requires_grad_(requires_grad)
+            layer.conv2.requires_grad_(requires_grad)
+        elif isinstance(layer, GlobalpoolFC):
+            layer.fc.requires_grad_(requires_grad)
+        else:
+            layer.requires_grad_(requires_grad)
+
+
+def get_layer_gradients(layer) -> torch.Tensor:
+    if isinstance(layer, PreActBlock):
+        return torch.tensor([layer.bn1.weight.grad or torch.zeros(1),
+                             layer.conv1.weight.grad or torch.zeros(1),
+                             layer.bn2.weight.grad or torch.zeros(1),
+                             layer.conv2.weight.grad or torch.zeros(1)])
+    elif isinstance(layer, GlobalpoolFC):
+        return layer.fc.weight.grad or torch.zeros(1)
+    return layer.weight.grad or torch.zeros(1)
+
+
+def get_model_gradients(model: PreActResNet18) -> torch.Tensor:
+    return torch.Tensor([get_layer_gradients(l) for l in model.layers])
 
 
 if __name__ == '__main__':
-    import torch
-    from torchvision.datasets import CIFAR10
-    from models import PreActResNet18
-    from torchvision.transforms import ToTensor
-
     #methods for the model to inclue
     # - get_num_layers
     # - freeze_layers   (freeze layers that are not in the active set)
     # - unfreeze_layers
 
     epochs = 100
-    batch_size = 512
+    batch_size = 2048
     num_layers = 10
     sparsity_budget = 2
     p_min = 0.1
     learning_rate = 0.01
-    use_jointspar = False
+    use_jointspar = True
+
+    print(f'Using JointSPAR: {use_jointspar}')
 
     jointspar = JointSpar(num_layers=num_layers, epochs=epochs, sparsity_budget=sparsity_budget, p_min=p_min)
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -110,9 +136,11 @@ if __name__ == '__main__':
 
     losses = []
     accuracies = []
+    times_per_epoch = []
 
     start = time.perf_counter()
     for epoch in range(jointspar.epochs):
+        epoch_start = time.perf_counter()
         if use_jointspar:
             S = jointspar.get_active_set(epoch)
         for i, data in enumerate(trainloader):
@@ -124,14 +152,14 @@ if __name__ == '__main__':
             loss = criterion(outputs, labels)
             losses.append(loss.item())
 
-            if use_jointspar:
-                set_grad_enabled_for_layers(model=model, active_layers=S)
+            if use_jointspar and epoch > 0:
+                set_grad_enabled_for_layers(model=model, num_layers=num_layers, active_layers=S)
 
             loss.backward()
             optimizer.step()
 
-            if use_jointspar:
-                grads = torch.tensor([l.weight.grad for l in model.layers])
+            if use_jointspar and epoch > 0:
+                grads = get_model_gradients(model)
                 sparsified_grads = jointspar.sparsify_gradient(epoch, grads)
                 jointspar.update_p(epoch, sparsified_grads, learning_rate)
 
@@ -148,7 +176,9 @@ if __name__ == '__main__':
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
-        
+        epoch_time = time.perf_counter() - epoch_start
+        times_per_epoch.append(epoch_time)
+
         accuracy = correct / total
         accuracies.append(accuracy * 100)
         delta = time.perf_counter() - start
@@ -159,7 +189,7 @@ if __name__ == '__main__':
     jointspar_suffix = '_jointspar' if use_jointspar else ''
     file_name = f'./runs/{epochs}epochs_{batch_size}batch{jointspar_suffix}.obj'
     with open(file_name, 'wb') as file:
-        pickle.dump([losses, accuracies], file)
+        pickle.dump([losses, accuracies, times_per_epoch], file)
 
     plt.plot(losses)
     plt.xlabel('Epoch')
@@ -169,6 +199,11 @@ if __name__ == '__main__':
     plt.plot(accuracies)
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy (%)')
+    plt.show()
+
+    plt.plot(times_per_epoch)
+    plt.xlabel('Epoch')
+    plt.ylabel('Time (s)')
     plt.show()
 
     total_time = time.perf_counter() - start
