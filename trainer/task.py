@@ -254,7 +254,7 @@ def eval(net, data_loader, DEVICE, es=(8.0, 20)):
 
         metrics = {
             f"Evaluation/clean_acc": clean_accuracy.mean,
-            f"Evaluation/clean_loss": adv_accuracy.mean,
+            f"Evaluation/adv_acc": adv_accuracy.mean,
         }
         wandb.log(metrics)
         pbar_dic = OrderedDict()
