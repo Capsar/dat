@@ -2,15 +2,16 @@ import time
 import torch
 import pickle
 import matplotlib.pyplot as plt
+import numpy as np 
 
 from utils import seconds_to_string
 from torchvision.datasets import CIFAR10
 from models import PreActResNet18, PreActBlock, GlobalpoolFC
 from torchvision.transforms import ToTensor
-
+from torch.nn import KLDivLoss
 
 class JointSpar:
-    def __init__(self, num_layers: int, epochs: int, sparsity_budget: float, p_min: float):
+    def __init__(self, num_layers: int, epochs: int, sparsity_budget: int, p_min: float):
         assert sparsity_budget <= num_layers, 'Sparsity budget must be smaller or equal to number of layers.'
         self.num_layers = num_layers
         self.epochs = epochs
@@ -39,13 +40,14 @@ class JointSpar:
     # Step 5 & 6 
     def sparsify_gradient(self, epoch: int, grads: torch.Tensor) -> torch.Tensor:
         # Set L
-        self.L = torch.max(self.L, torch.max(grads))
+        self.L = torch.max(self.L, max([torch.norm(g) for g in grads]))
         # 5: normalize
         grads = grads / self.p[epoch]
         
         # 6: construct sparsified gradient
         sparsified_grads = torch.zeros_like(grads)
         layers_to_compute = torch.tensor(self.S[epoch])
+        print(f'Layers to compute: {layers_to_compute}')
         sparsified_grads[layers_to_compute] = grads[layers_to_compute]
         print(f'Sparsified grads: {sparsified_grads}')
         return sparsified_grads
@@ -71,7 +73,10 @@ class JointSpar:
         print(f'l: {l}')
         print(f'w: {w}')
         # line 10: to bring it back to a probability distribution but with a sum of sparsity budget
-        self.p[epoch + 1] = (w / torch.sum(w)) * self.sparsity
+
+        w.where(w < self.p_min, torch.tensor(self.p_min))
+        print(f'w: {w}')
+        self.p[epoch + 1] = w * (self.sparsity/torch.sum(w))
 
 
 def set_grad_enabled_for_layers(model, num_layers, active_layers):
@@ -93,17 +98,24 @@ def set_grad_enabled_for_layers(model, num_layers, active_layers):
 
 def get_layer_gradients(layer) -> torch.Tensor:
     if isinstance(layer, PreActBlock):
-        return torch.tensor([layer.bn1.weight.grad or torch.zeros(1),
-                             layer.conv1.weight.grad or torch.zeros(1),
-                             layer.bn2.weight.grad or torch.zeros(1),
-                             layer.conv2.weight.grad or torch.zeros(1)])
+        return torch.tensor([get_layer_safe(layer.bn1),
+                             get_layer_safe(layer.conv1),
+                             get_layer_safe(layer.bn2),
+                             get_layer_safe(layer.conv2)])
     elif isinstance(layer, GlobalpoolFC):
-        return layer.fc.weight.grad or torch.zeros(1)
-    return layer.weight.grad or torch.zeros(1)
+        return get_layer_safe(layer.fc)
+    return get_layer_safe(layer)
 
+def get_layer_safe(layer) -> torch.Tensor:
+    if layer.weight.grad is None:
+        return torch.zeros(1)
+    return layer.weight.grad
 
-def get_model_gradients(model: PreActResNet18) -> torch.Tensor:
-    return torch.Tensor([get_layer_gradients(l) for l in model.layers])
+def get_model_gradients(model: PreActResNet18, active_layers) -> torch.Tensor:
+    return torch.Tensor([get_layer_gradients(l) if i in active_layers else torch.zeros(1) for i,l in enumerate(model.layers)])
+
+#Just to write it down somewhere, we should maybe change the way we pick which layers are taken and which are not, as atm its truely random leading to maybe zero layers being taken
+#we could do smth like "take the #budget layers with probabilites given"?
 
 
 if __name__ == '__main__':
@@ -113,9 +125,9 @@ if __name__ == '__main__':
     # - unfreeze_layers
 
     epochs = 100
-    batch_size = 2048
+    batch_size = 512
     num_layers = 10
-    sparsity_budget = 2
+    sparsity_budget = 5
     p_min = 0.1
     learning_rate = 0.01
     use_jointspar = True
@@ -143,6 +155,8 @@ if __name__ == '__main__':
         epoch_start = time.perf_counter()
         if use_jointspar:
             S = jointspar.get_active_set(epoch)
+            set_grad_enabled_for_layers(model=model, num_layers=num_layers, active_layers=S)
+
         for i, data in enumerate(trainloader):
             inputs, labels = data
             inputs, labels = inputs.to(device), labels.to(device)
@@ -152,14 +166,11 @@ if __name__ == '__main__':
             loss = criterion(outputs, labels)
             losses.append(loss.item())
 
-            if use_jointspar and epoch > 0:
-                set_grad_enabled_for_layers(model=model, num_layers=num_layers, active_layers=S)
-
             loss.backward()
             optimizer.step()
 
-            if use_jointspar and epoch > 0:
-                grads = get_model_gradients(model)
+            if use_jointspar:
+                grads = get_model_gradients(model, S)
                 sparsified_grads = jointspar.sparsify_gradient(epoch, grads)
                 jointspar.update_p(epoch, sparsified_grads, learning_rate)
 
