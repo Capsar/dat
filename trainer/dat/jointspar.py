@@ -53,29 +53,30 @@ class JointSpar:
         return sparsified_grads
     
     # Algo 1
-    def update_p(self, epoch: int, grads: torch.Tensor, learning_rate: float):
-        l = torch.Tensor(self.num_layers)
+    def update_p(self, epoch: int, grads, learning_rate: float):
+        l = torch.Tensor(self.num_layers, device='cpu')
         w = torch.Tensor(self.num_layers)
 
         active_set = self.S[epoch]
         for d in range(self.num_layers):
             if d in active_set:
-                g = torch.zeros_like(grads)
-                g[d] = grads[d]
+                g = torch.zeros_like(grads[d])
+                g = torch.zeros_like(torch.stack([g]*self.Z.shape[1]))
+                g[d] = grads[d].detach().cpu()
                 l1 = -torch.pow(g.norm(), 2) / torch.pow(self.p[epoch, d], 2)
                 l2 = torch.pow(self.L, 2) / torch.pow(self.p_min, 2)
-                l[d] = l1 + l2
+                l[d] = l1.detach().cpu() + l2.detach().cpu()
             else:
                 l[d] = 0
             w[d] = self.p[epoch, d] * torch.exp((-learning_rate * l[d]) / self.p[epoch, d])
 
-        print(f'L: {self.L}')
-        print(f'l: {l}')
-        print(f'w: {w}')
-        # line 10: to bring it back to a probability distribution but with a sum of sparsity budget
+        # print(f'L: {self.L}')
+        # print(f'l: {l}')
+        # print(f'w: {w}')
 
+        # line 10: to bring it back to a probability distribution but with a sum of sparsity budget
         w.where(w < self.p_min, torch.tensor(self.p_min))
-        print(f'w: {w}')
+        # print(f'w: {w}')
         self.p[epoch + 1] = w * (self.sparsity/torch.sum(w))
 
 
@@ -98,7 +99,7 @@ def set_grad_enabled_for_layers(model, num_layers, active_layers):
 
 def get_layer_gradients(layer) -> torch.Tensor:
     if isinstance(layer, PreActBlock):
-        return torch.tensor([get_layer_safe(layer.bn1),
+        return torch.Tensor([get_layer_safe(layer.bn1),
                              get_layer_safe(layer.conv1),
                              get_layer_safe(layer.bn2),
                              get_layer_safe(layer.conv2)])
@@ -127,14 +128,13 @@ if __name__ == '__main__':
     epochs = 100
     batch_size = 512
     num_layers = 10
-    sparsity_budget = 5
+    sparsity_budget = 30
     p_min = 0.1
     learning_rate = 0.01
     use_jointspar = True
 
     print(f'Using JointSPAR: {use_jointspar}')
 
-    jointspar = JointSpar(num_layers=num_layers, epochs=epochs, sparsity_budget=sparsity_budget, p_min=p_min)
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = PreActResNet18().to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
@@ -146,6 +146,9 @@ if __name__ == '__main__':
     testset = CIFAR10(root='./data', train=False, download=True, transform=ToTensor())
     testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
 
+    if use_jointspar:
+        jointspar = JointSpar(num_layers=sum([1 for _ in model.parameters()]), epochs=epochs, sparsity_budget=sparsity_budget, p_min=p_min)
+
     losses = []
     accuracies = []
     times_per_epoch = []
@@ -155,12 +158,17 @@ if __name__ == '__main__':
         epoch_start = time.perf_counter()
         if use_jointspar:
             S = jointspar.get_active_set(epoch)
-            set_grad_enabled_for_layers(model=model, num_layers=num_layers, active_layers=S)
+            for i,p in enumerate(model.parameters()):
+                p.requires_grad_(i in S)
 
         for i, data in enumerate(trainloader):
             inputs, labels = data
             inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
+            
+            if i == 0 and epoch == 0:
+                pass
+            else:
+                optimizer.zero_grad()
             
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -170,8 +178,22 @@ if __name__ == '__main__':
             optimizer.step()
 
             if use_jointspar:
-                grads = get_model_gradients(model, S)
-                sparsified_grads = jointspar.sparsify_gradient(epoch, grads)
+                #this is the part that would happen for every parameter individually
+                
+                #for distribute:
+                # for i,p in enumerate(params):
+                # distribute (p/jointsparse.p[epoch,i])
+                # gather things
+
+                sparsified_grads=[]
+                for i,p in enumerate(model.parameters()):
+                    if i in S:
+                        p.grad = p.grad * jointspar.p[epoch, i]
+                        sparsified_grads.append(p.grad/ jointspar.p[epoch, i])
+                    else: 
+                        sparsified_grads.append([])
+                #sparsified_grads = jointspar.sparsify_gradient(epoch, grads)
+                
                 jointspar.update_p(epoch, sparsified_grads, learning_rate)
 
             if i % 100 == 0:
