@@ -309,8 +309,8 @@ def main_worker(local_rank, group_name, args):
         global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
         print('cifar check 1')
         net = PreActResNet18().to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
-        # net = torch.nn.DataParallel(net).to(DEVICE)
+        # net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
+        net = torch.nn.DataParallel(net, device_ids=[local_rank]).to(DEVICE)
 
         print('cifar check 2')
         if args.wolalr:
@@ -333,8 +333,8 @@ def main_worker(local_rank, group_name, args):
         global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
 
         net = resnet50().to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
-        # net = torch.nn.DataParallel(net).to(DEVICE)
+        # net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
+        net = torch.nn.DataParallel(net, device_ids=[local_rank]).to(DEVICE)
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
