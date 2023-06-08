@@ -11,6 +11,8 @@ from torchvision.datasets import CIFAR10
 from models import PreActResNet18, PreActBlock, GlobalpoolFC
 from torchvision.transforms import ToTensor
 from torch.nn import KLDivLoss
+import torch.optim as optim
+
 
 timing_dict = {
     'get_active_set': {
@@ -57,6 +59,7 @@ class JointSpar:
         self.Z = torch.zeros((self.epochs, self.num_layers))
         self.S = [[]] * self.epochs
         self.L = torch.zeros(1)
+        self.KL = KLDivLoss(reduction='sum')
 
     # Step 2 & 3
     @time_jointspar(name='get_active_set')
@@ -112,10 +115,43 @@ class JointSpar:
         # print(f'w: {w}')
 
         # line 10: to bring it back to a probability distribution but with a sum of sparsity budget
-        w.where(w < self.p_min, torch.tensor(self.p_min))
+        # w.where(w < self.p_min, torch.tensor(self.p_min))
         # print(f'w: {w}')
 
-        self.p[epoch + 1] = w * (self.sparsity / torch.sum(w))
+        #self.p[epoch + 1] = w * (self.sparsity / torch.sum(w))
+        self.p[epoch + 1] = self.optimize_distribution(w)
+
+    def optimize_distribution(self, p):
+        p_min = self.p_min / self.sparsity
+
+        # Convert p to a PyTorch tensor
+        p_tensor = p.clone().detach()
+
+        # Define the parameters as variables to optimize
+        n = len(p)
+        q = torch.nn.Parameter(torch.ones(n) / n)
+
+        # Define the optimizer
+        optimizer = optim.LBFGS([q])
+
+        # Define the closure function for the optimizer
+        def closure():
+            optimizer.zero_grad()
+            kl_divergence = self.KL(torch.log(q), p_tensor)
+            kl_divergence.backward()
+            return kl_divergence
+
+        # Perform optimization
+        optimizer.step(closure)
+
+        # Normalize q to sum up to 1
+        q_normalized = q.detach().numpy() / q.sum().detach().numpy()
+
+        # Apply the minimum value constraint
+        q_final = np.maximum( q_normalized, p_min )
+
+        #print(f'q: {q_final * self.sparsity}')
+        return q_final * self.sparsity
 
 
 def set_grad_enabled_for_layers(model, num_layers, active_layers):
@@ -145,10 +181,12 @@ def get_layer_gradients(layer) -> torch.Tensor:
         return get_layer_safe(layer.fc)
     return get_layer_safe(layer)
 
+
 def get_layer_safe(layer) -> torch.Tensor:
     if layer.weight.grad is None:
         return torch.zeros(1)
     return layer.weight.grad
+
 
 def get_model_gradients(model: PreActResNet18, active_layers) -> torch.Tensor:
     return torch.Tensor([get_layer_gradients(l) if i in active_layers else torch.zeros(1) for i,l in enumerate(model.layers)])
@@ -163,13 +201,12 @@ if __name__ == '__main__':
     # - freeze_layers   (freeze layers that are not in the active set)
     # - unfreeze_layers
 
-    epochs = 5
-    batch_size = 512
+    epochs = 10
+    batch_size = 256
     sparsity_budget = 30
-    p_min = 0.1
+    p_min = 0.05
     learning_rate = 0.01
     use_jointspar = True
-
     print(f'Using JointSPAR: {use_jointspar}')
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -207,6 +244,7 @@ if __name__ == '__main__':
             S = jointspar.get_active_set(epoch)
             for i, p in enumerate(model.parameters()):
                 p.requires_grad_(i in S)
+            print(f'p: {jointspar.p[epoch, :]}')
 
         for i, data in enumerate(trainloader):
             inputs, labels = data
@@ -218,26 +256,20 @@ if __name__ == '__main__':
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             losses.append(loss.item())
-
-            if use_jointspar:
-                sparsified_grads=[]
-                for i, p in enumerate(model.parameters()):
-                    if i in S:
-                        curr_p = 0 if p.grad is None else p.grad
-                        sparsified_grads.append(curr_p / jointspar.p[epoch, i])
-                    else:
-                        sparsified_grads.append([])
-                jointspar.update_p(epoch, sparsified_grads, learning_rate)
-
             loss.backward()
             optimizer.step()
 
-            # for i, p in enumerate(model.parameters()):
-            #     if p.grad is None:
-            #         print('AFTER', i, p.grad, p.requires_grad)
-
-            # if i % 100 == 0:
-            #     print(f'Epoch {epoch}, batch {i}, loss {loss.item()}')
+        if use_jointspar:
+            sparsified_grads = []
+            for ind, p in enumerate(model.parameters()):
+                if ind in S:
+                    curr_p = 0 if p.grad is None else p.grad
+                    if p.grad is None and epoch > 0:
+                        print(f'{epoch} {i} {ind} p.grad is None!')
+                    sparsified_grads.append(curr_p / jointspar.p[epoch, ind])
+                else:
+                    sparsified_grads.append([])
+            jointspar.update_p(epoch, sparsified_grads, learning_rate)
 
         correct = 0
         total = 0
@@ -265,7 +297,7 @@ if __name__ == '__main__':
         if use_jointspar:
             print(timing_dict)
 
-    jointspar_suffix = '_jointspar' if use_jointspar else ''
+    jointspar_suffix = '_jointspar_KL' if use_jointspar else ''
     file_name = f'./runs/{epochs}epochs_{batch_size}batch{jointspar_suffix}.obj'
     with open(file_name, 'wb') as file:
         pickle.dump([losses, accuracies, times_per_epoch], file)
@@ -279,11 +311,6 @@ if __name__ == '__main__':
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy (%)')
     plt.show()
-
-    # plt.plot(times_per_epoch)
-    # plt.xlabel('Epoch')
-    # plt.ylabel('Time (s)')
-    # plt.show()
 
     fig, ax1 = plt.subplots()
     ax1.plot(times_per_epoch, color='blue')
