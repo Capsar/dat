@@ -11,6 +11,8 @@ from torchvision.datasets import CIFAR10
 from models import PreActResNet18, PreActBlock, GlobalpoolFC
 from torchvision.transforms import ToTensor
 from torch.nn import KLDivLoss
+import torch.optim as optim
+
 
 timing_dict = {
     'get_active_set': {
@@ -57,6 +59,7 @@ class JointSpar:
         self.Z = torch.zeros((self.epochs, self.num_layers))
         self.S = [[]] * self.epochs
         self.L = torch.zeros(1)
+        self.KL = KLDivLoss(reduction='sum')
 
     # Step 2 & 3
     @time_jointspar(name='get_active_set')
@@ -112,10 +115,42 @@ class JointSpar:
         # print(f'w: {w}')
 
         # line 10: to bring it back to a probability distribution but with a sum of sparsity budget
-        w.where(w < self.p_min, torch.tensor(self.p_min))
+        # w.where(w < self.p_min, torch.tensor(self.p_min))
         # print(f'w: {w}')
 
-        self.p[epoch + 1] = w * (self.sparsity / torch.sum(w))
+        #self.p[epoch + 1] = w * (self.sparsity / torch.sum(w))
+        self.p[epoch + 1] = self.optimize_distribution(w)
+
+    def optimize_distribution(self, p):
+        p_min = self.p_min / self.sparsity
+
+        # Convert p to a PyTorch tensor
+        p_tensor = torch.tensor(p, dtype=torch.float)
+
+        # Define the parameters as variables to optimize
+        q = torch.nn.Parameter(torch.ones(n) / n)
+
+        # Define the optimizer
+        optimizer = optim.LBFGS([q])
+
+        # Define the closure function for the optimizer
+        def closure():
+            optimizer.zero_grad()
+            kl_divergence = self.KL(torch.log(q), p_tensor)
+            loss.backward()
+            return loss
+
+        # Perform optimization
+        optimizer.step(closure)
+
+        # Normalize q to sum up to 1
+        q_normalized = q.detach().numpy() / q.sum().detach().numpy()
+
+        # Apply the minimum value constraint
+        q_final = np.maximum( q_normalized, p_min )
+
+        print(f'q: {q_final*self.sparsity}')
+        return q_final*self.sparsity
 
 
 def set_grad_enabled_for_layers(model, num_layers, active_layers):
@@ -164,7 +199,7 @@ if __name__ == '__main__':
     # - unfreeze_layers
 
     epochs = 5
-    batch_size = 256
+    batch_size = 1
     num_layers = 10
     sparsity_budget = 30
     p_min = 0.1
