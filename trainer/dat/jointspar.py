@@ -164,17 +164,20 @@ if __name__ == '__main__':
     # - unfreeze_layers
 
     epochs = 5
-    batch_size = 256
-    num_layers = 10
+    batch_size = 512
     sparsity_budget = 30
     p_min = 0.1
     learning_rate = 0.01
-    use_jointspar = False
+    use_jointspar = True
 
     print(f'Using JointSPAR: {use_jointspar}')
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = PreActResNet18().to(device)
+
+    num_layers = sum(1 for _ in model.parameters())
+    print(f'Number of layers: {num_layers}')
+
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     criterion = torch.nn.CrossEntropyLoss().to(device)
 
@@ -185,7 +188,7 @@ if __name__ == '__main__':
     testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
 
     jointspar = JointSpar(
-        num_layers=sum(1 for _ in model.parameters()),
+        num_layers=num_layers,
         epochs=epochs,
         sparsity_budget=sparsity_budget,
         p_min=p_min,
@@ -256,8 +259,11 @@ if __name__ == '__main__':
         delta = time.perf_counter() - start
         time_per_epoch = delta / (epoch + 1)
         eta = (epochs - (epoch + 1)) * time_per_epoch
-        print(f'Epoch {epoch + 1} / {epochs}, accuracy {accuracy * 100:.2f}% ETA: {seconds_to_string(eta)} Time/Epoch: {time_per_epoch:.2f}s')
-        print(timing_dict)
+        active_layers_str = f'active layers = {len(S)}' if use_jointspar else ''
+        print(f'Epoch {epoch + 1} / {epochs}, accuracy {accuracy * 100:.2f}% ETA: {seconds_to_string(eta)} '
+              f'Time/Epoch: {time_per_epoch:.2f}s {active_layers_str}')
+        if use_jointspar:
+            print(timing_dict)
 
     jointspar_suffix = '_jointspar' if use_jointspar else ''
     file_name = f'./runs/{epochs}epochs_{batch_size}batch{jointspar_suffix}.obj'
@@ -274,10 +280,10 @@ if __name__ == '__main__':
     plt.ylabel('Accuracy (%)')
     plt.show()
 
-    plt.plot(times_per_epoch)
-    plt.xlabel('Epoch')
-    plt.ylabel('Time (s)')
-    plt.show()
+    # plt.plot(times_per_epoch)
+    # plt.xlabel('Epoch')
+    # plt.ylabel('Time (s)')
+    # plt.show()
 
     fig, ax1 = plt.subplots()
     ax1.plot(times_per_epoch, color='blue')
