@@ -54,7 +54,9 @@ class JointSpar:
         self.sparsity = sparsity_budget
         self.p_min = torch.tensor(p_min)
         self.p = torch.zeros((self.epochs + 1, self.num_layers))
-        p0 = self.sparsity / self.num_layers
+
+        p0 = 1 / self.num_layers
+        
         self.p[0, :] = torch.full((self.num_layers,), p0)
         self.Z = torch.zeros((self.epochs, self.num_layers))
         self.S = [[]] * self.epochs
@@ -69,7 +71,7 @@ class JointSpar:
         # print(f'Current p: {self.p[epoch, :]}')
         sample = torch.rand(self.num_layers)
         #print(f'Pytorch sample: {sample}')
-        self.Z[epoch, :] = torch.where(sample < self.p[epoch, :], torch.tensor(1.0), torch.tensor(0.0))
+        self.Z[epoch, :] = torch.where(sample < self.p[epoch, :]*self.sparsity, torch.tensor(1.0), torch.tensor(0.0))
         #print(f'{epoch}. Z: {self.Z[epoch, :]}')
         self.S[epoch] = torch.nonzero(self.Z[epoch, :] == 1.0).flatten().tolist()
         #print(f'{epoch}. S: {self.S[epoch]}')
@@ -122,11 +124,9 @@ class JointSpar:
         self.p[epoch + 1] = self.optimize_distribution(w)
 
     def optimize_distribution(self, p):
-        p_min = self.p_min / self.sparsity
-
         # Convert p to a PyTorch tensor
         p_tensor = p.clone().detach()
-
+        p_tensor= torch.clip(p_tensor, self.p_min, 1.0)
         # Define the parameters as variables to optimize
         n = len(p)
         q = torch.nn.Parameter(torch.ones(n) / n)
@@ -145,13 +145,13 @@ class JointSpar:
         optimizer.step(closure)
 
         # Normalize q to sum up to 1
-        q_normalized = q.detach().numpy() / q.sum().detach().numpy()
+        q_normalized = q.detach() / q.sum().detach()
 
         # Apply the minimum value constraint
-        q_final = np.maximum( q_normalized, p_min )
+        q_final = torch.clip(q_normalized, self.p_min, 1.0)
 
         #print(f'q: {q_final * self.sparsity}')
-        return q_final * self.sparsity
+        return q_final #* self.sparsity
 
 
 def set_grad_enabled_for_layers(model, num_layers, active_layers):
@@ -201,10 +201,10 @@ if __name__ == '__main__':
     # - freeze_layers   (freeze layers that are not in the active set)
     # - unfreeze_layers
 
-    epochs = 10
-    batch_size = 256
+    epochs = 100
+    batch_size = 1024
     sparsity_budget = 30
-    p_min = 0.05
+    p_min = 0.005/sparsity_budget
     learning_rate = 0.01
     use_jointspar = True
     print(f'Using JointSPAR: {use_jointspar}')
