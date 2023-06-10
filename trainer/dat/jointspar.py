@@ -3,6 +3,7 @@ import torch
 import pickle
 import matplotlib.pyplot as plt
 
+from trainer.dat.dataset import Cifar_EXT
 from utils import seconds_to_string
 from torchvision.datasets import CIFAR10
 from models import PreActResNet18, PreActBlock, GlobalpoolFC
@@ -103,24 +104,23 @@ def get_layer_gradients(layer) -> torch.Tensor:
 
 
 def get_model_gradients(model: PreActResNet18) -> torch.Tensor:
-    return torch.Tensor([get_layer_gradients(l) for l in model.layers])
+    for l in model.layers:
+        print(get_layer_gradients(l), type(get_layer_gradients(l)))
+    el = torch.Tensor([get_layer_gradients(l) for l in model.layers])
+    return el
 
 
-if __name__ == '__main__':
-    #methods for the model to inclue
-    # - get_num_layers
-    # - freeze_layers   (freeze layers that are not in the active set)
-    # - unfreeze_layers
-
+def main(batch_size: int):
     epochs = 100
-    batch_size = 2048
     num_layers = 10
     sparsity_budget = 2
     p_min = 0.1
     learning_rate = 0.01
-    use_jointspar = True
+    use_jointspar = False
+    use_cifarext = True
 
     print(f'Using JointSPAR: {use_jointspar}')
+    print(f'Using CifarEXT: {use_cifarext}')
 
     jointspar = JointSpar(num_layers=num_layers, epochs=epochs, sparsity_budget=sparsity_budget, p_min=p_min)
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -128,11 +128,14 @@ if __name__ == '__main__':
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     criterion = torch.nn.CrossEntropyLoss().to(device)
 
-    trainset = CIFAR10(root='./data', train=True, download=True, transform=ToTensor())
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    if use_cifarext:
+        trainloader, testloader, train_sampler = Cifar_EXT.get_local_loader(batch_size, './data')
+    else:
+        trainset = CIFAR10(root='./data', train=True, download=True, transform=ToTensor())
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
 
-    testset = CIFAR10(root='./data', train=False, download=True, transform=ToTensor())
-    testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
+        testset = CIFAR10(root='./data', train=False, download=True, transform=ToTensor())
+        testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
 
     losses = []
     accuracies = []
@@ -143,16 +146,18 @@ if __name__ == '__main__':
         epoch_start = time.perf_counter()
         if use_jointspar:
             S = jointspar.get_active_set(epoch)
+
         for i, data in enumerate(trainloader):
             inputs, labels = data
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-            
+
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             losses.append(loss.item())
 
             if use_jointspar and epoch > 0:
+                print(f'Current active set: {S}')
                 set_grad_enabled_for_layers(model=model, num_layers=num_layers, active_layers=S)
 
             loss.backward()
@@ -163,8 +168,8 @@ if __name__ == '__main__':
                 sparsified_grads = jointspar.sparsify_gradient(epoch, grads)
                 jointspar.update_p(epoch, sparsified_grads, learning_rate)
 
-            if i % 100 == 0:
-                print(f'Epoch {epoch}, batch {i}, loss {loss.item()}')
+            # if i % 100 == 0:
+            #     print(f'Epoch {epoch}, batch {i}, loss {loss.item()}')
 
         correct = 0
         total = 0
@@ -187,9 +192,12 @@ if __name__ == '__main__':
         print(f'Epoch {epoch + 1} / {epochs}, accuracy {accuracy * 100:.2f}% ETA: {seconds_to_string(eta)} Time/Epoch: {time_per_epoch:.2f}s')
 
     jointspar_suffix = '_jointspar' if use_jointspar else ''
-    file_name = f'./runs/{epochs}epochs_{batch_size}batch{jointspar_suffix}.obj'
+    cifar_suffix = '_cifarext' if use_cifarext else ''
+    file_name = f'./runs/{epochs}epochs_{batch_size}batch{jointspar_suffix}{cifar_suffix}.obj'
+    print(f'Saving as file: {file_name}...')
     with open(file_name, 'wb') as file:
         pickle.dump([losses, accuracies, times_per_epoch], file)
+    print('File saved!')
 
     plt.plot(losses)
     plt.xlabel('Epoch')
@@ -208,3 +216,14 @@ if __name__ == '__main__':
 
     total_time = time.perf_counter() - start
     print(f'Finished Training in {seconds_to_string(total_time)}')
+
+
+if __name__ == '__main__':
+    #methods for the model to inclue
+    # - get_num_layers
+    # - freeze_layers   (freeze layers that are not in the active set)
+    # - unfreeze_layers
+
+    for batch_size in [1024]:
+        print(f'\n\nRunning with batch size {batch_size}')
+        main(batch_size)
