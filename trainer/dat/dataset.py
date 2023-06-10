@@ -103,6 +103,37 @@ class Cifar_EXT:
         testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
         return trainloader, testloader, train_sampler
 
+    @staticmethod
+    def get_local_loader(batch_size, root):
+        root1 = root
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+        ])
+
+        trainset = torchvision.datasets.CIFAR10(root=root, train=True, download=True, transform=transform_train)
+
+        aux_path = os.path.join(root1, 'ti_500K_pseudo_labeled.pickle')
+        print(f'Loading data from ti_500K_pseudo_labeled.pickle from file: {aux_path}')
+        with open(aux_path, 'rb') as f:
+            aux = pickle.load(f)
+        aux_data = aux['data']
+        aux_targets = aux['extrapolated_targets']
+
+        trainset.data = np.concatenate((trainset.data, aux_data), axis=0)
+        trainset.targets.extend(aux_targets)
+
+        train_sampler = torch.utils.data.Sampler(trainset)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
+
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+        ])
+        testset = torchvision.datasets.CIFAR10(root=root, train=False, download=False, transform=transform_test)
+        testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
+        return trainloader, testloader, train_sampler
+
 
 class ImageNet:
     @staticmethod

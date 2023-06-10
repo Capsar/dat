@@ -88,5 +88,5 @@ def seconds_to_string(seconds: float) -> str:
     minutes, seconds = divmod(seconds, 60)
     day_part = f'{int(days)} DAYS ' if days > 0 else ''
     hour_part = f'{int(hours):02}H:' if hours > 0 else ''
-    minute_part = f'{int(minutes):02}M:' if minutes > 0 else ''
+    minute_part = f'{int(minutes):02}M:' if minutes > 0 or hours > 0 else ''
     return f'{day_part}{hour_part}{minute_part}{int(seconds):02}S'
