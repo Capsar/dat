@@ -77,7 +77,7 @@ class JointSpar:
         #print(f'{epoch}. S: {self.S[epoch]}')
         return self.S[epoch]
     
-    # Step 5 & 6
+    # Step 5 & 6  ---- redundant and unused
     @time_jointspar(name='sparsify_gradient')
     def sparsify_gradient(self, epoch: int, grads: torch.Tensor) -> torch.Tensor:
         # Set L
@@ -98,8 +98,10 @@ class JointSpar:
     def update_p(self, epoch: int, grads, learning_rate: float):
         l = torch.Tensor(self.num_layers, device='cpu')
         w = torch.Tensor(self.num_layers)
-
         active_set = self.S[epoch]
+                
+        self.L = torch.max(self.L.detach().cpu(), torch.max(torch.stack([torch.norm(g).detach().cpu() for i,g in enumerate(grads) if i in active_set])))
+
         for d in range(self.num_layers):
             if d in active_set:
                 g = torch.zeros_like(grads[d])
@@ -127,6 +129,9 @@ class JointSpar:
         # Convert p to a PyTorch tensor
         p_tensor = p.clone().detach()
         p_tensor= torch.clip(p_tensor, self.p_min, 1.0)
+
+        print(f'Before update p: {p_tensor}')
+        
         # Define the parameters as variables to optimize
         n = len(p)
         q = torch.nn.Parameter(torch.ones(n) / n)
@@ -149,6 +154,8 @@ class JointSpar:
 
         # Apply the minimum value constraint
         q_final = torch.clip(q_normalized, self.p_min, 1.0)
+
+        print(f'After update p: {q_final}')
 
         #print(f'q: {q_final * self.sparsity}')
         return q_final #* self.sparsity
