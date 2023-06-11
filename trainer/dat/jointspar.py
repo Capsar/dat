@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np 
 
 from trainer.dat.dataset import Cifar_EXT
+from trainer.dat.helpers import send_telegram_message
+from trainer.dat.params import Params
 from utils import seconds_to_string
 from torchvision.datasets import CIFAR10
 from models import PreActResNet18, PreActBlock, GlobalpoolFC
@@ -131,7 +133,7 @@ class JointSpar:
         p_tensor = p.clone().detach()
         p_tensor= torch.clip(p_tensor, self.p_min, 1.0)
 
-        print(f'Before update p: {p_tensor}')
+        #print(f'Before update p: {p_tensor}')
         
         # Define the parameters as variables to optimize
         n = len(p)
@@ -156,7 +158,7 @@ class JointSpar:
         # Apply the minimum value constraint
         q_final = torch.clip(q_normalized, self.p_min, 1.0)
 
-        print(f'After update p: {q_final}')
+        #print(f'After update p: {q_final}')
 
         #print(f'q: {q_final * self.sparsity}')
         return q_final #* self.sparsity
@@ -165,13 +167,15 @@ class JointSpar:
 #we could do smth like "take the #budget layers with probabilites given"?
 
 
-def main(batch_size: int):
-    epochs = 100
-    sparsity_budget = 30
-    p_min = 0.005 / sparsity_budget
-    learning_rate = 0.01
-    use_jointspar = False
-    use_cifarext = True
+def main(params: Params, plot=False):
+    send_telegram_message(message=f'Starting run with params: {str(params)}')
+    epochs = params.epochs
+    batch_size = params.batch_size
+    sparsity_budget = params.sparsity_budget
+    p_min = params.p_min
+    learning_rate = params.learning_rate
+    use_cifarext = params.use_cifarext
+    use_jointspar = params.use_jointspar
 
     print(f'Using JointSPAR: {use_jointspar}')
     print(f'Using CifarEXT: {use_cifarext}')
@@ -188,10 +192,10 @@ def main(batch_size: int):
     if use_cifarext:
         trainloader, testloader, train_sampler = Cifar_EXT.get_local_loader(batch_size, './data')
     else:
-        trainset = CIFAR10(root='./data', train=True, download=True, transform=ToTensor())
+        trainset = CIFAR10(root='./data', train=True, download=False, transform=ToTensor())
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
 
-        testset = CIFAR10(root='./data', train=False, download=True, transform=ToTensor())
+        testset = CIFAR10(root='./data', train=False, download=False, transform=ToTensor())
         testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
 
     jointspar = JointSpar(
@@ -268,43 +272,42 @@ def main(batch_size: int):
         if use_jointspar:
             print(timing_dict)
 
-    jointspar_suffix = '_jointspar' if use_jointspar else ''
-    cifar_suffix = '_cifarext' if use_cifarext else ''
-    file_name = f'./runs/{epochs}epochs_{batch_size}batch{jointspar_suffix}{cifar_suffix}.obj'
-    print(f'Saving as file: {file_name}...')
-
+    file_name = params.get_filename()
     with open(file_name, 'wb') as file:
-        pickle.dump([losses, accuracies, times_per_epoch], file)
+        pickle.dump([losses, accuracies, times_per_epoch, params], file)
     print('File saved!')
 
-    plt.plot(losses)
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.show()
+    if plot:
+        plt.plot(losses)
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.show()
 
-    plt.plot(accuracies)
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy (%)')
-    plt.show()
+        plt.plot(accuracies)
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy (%)')
+        plt.show()
 
-    fig, ax1 = plt.subplots()
-    ax1.plot(times_per_epoch, color='blue')
-    ax1.set_ylabel('Time (s)', color='blue')
+        fig, ax1 = plt.subplots()
+        ax1.plot(times_per_epoch, color='blue')
+        ax1.set_ylabel('Time (s)', color='blue')
 
-    if use_jointspar:
-        ax2 = ax1.twinx()
-        ax2.plot(active_layers_per_epoch, color='red')
-        ax2.set_ylabel('Active Layers', color='red')
+        if use_jointspar:
+            ax2 = ax1.twinx()
+            ax2.plot(active_layers_per_epoch, color='red')
+            ax2.set_ylabel('Active Layers', color='red')
 
-        # Optionally, set the limits and formatting for the second y-axis
-        ax2.set_ylim(0, 350)
-        ax2.yaxis.set_tick_params(color='red')
+            # Optionally, set the limits and formatting for the second y-axis
+            ax2.set_ylim(0, 350)
+            ax2.yaxis.set_tick_params(color='red')
 
-    # Show the plot
-    plt.show()
+        # Show the plot
+        plt.show()
 
     total_time = time.perf_counter() - start
-    print(f'Finished Training in {seconds_to_string(total_time)}')
+    time_str = seconds_to_string(total_time)
+    print(f'Finished Training in {time_str}')
+    send_telegram_message(message=f'Done with run in {time_str} Final accuracy: {accuracies[-1]:.2f}%')
 
 
 if __name__ == '__main__':
@@ -313,6 +316,24 @@ if __name__ == '__main__':
     # - freeze_layers   (freeze layers that are not in the active set)
     # - unfreeze_layers
 
-    for batch_size in [2048]:
-        print(f'\n\nRunning with batch size {batch_size}')
-        main(batch_size)
+
+    # If p_min is not in Params object its value is 0.005
+    param_list = [
+        Params(
+            epochs=100,
+            batch_size=2048,
+            sparsity_budget=40,
+            p_min=p_min,
+            learning_rate=0.01,
+            use_cifarext=True,
+            use_jointspar=True,
+        )
+        for p_min in [0.5, 0.05, 0.005, 0.0005]
+    ]
+    for ind, p in enumerate(param_list):
+        main(p)
+        send_telegram_message(f'Remaining runs: {len(param_list) - (ind + 1)}/{len(param_list)}\n\n')
+
+
+### Cifar Batch 2048 Epochs 100 Sparsity 30: 17M:07S JointSPAR: False
+### Cifar Batch 2048 Epochs 100 Sparsity 30: 14M:23S JointSPAR: True
