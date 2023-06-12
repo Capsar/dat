@@ -14,6 +14,7 @@ setup(
         'wandb',
         'tensorboard',
         'torch-tb-profiler',
+        'python-dotenv'
     ],
     # entry_points={
     #         'console_scripts': [

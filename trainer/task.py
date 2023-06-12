@@ -1,15 +1,18 @@
-import glob
 import json
 import time
-import logging
 import sys
 import torch
+import os
 import torch.distributed as dist
 import argparse
+import wandb
+
 from datetime import datetime
 from tqdm import tqdm
-import os
 from collections import OrderedDict
+from torch.profiler import profile, record_function, ProfilerActivity
+
+from trainer.dat.jointspar import JointSpar
 from trainer.dat.quantization import RandomQuantizer
 from trainer.dat.attack import PGD
 from torch.autograd import Variable
@@ -19,10 +22,6 @@ from trainer.dat.utils import save_checkpoint, torch_accuracy, AvgMeter
 from torchvision.models import resnet50
 from trainer.dat.lamb import Lamb
 from trainer.dat.helpers import send_telegram_message
-
-import wandb
-
-from torch.profiler import profile, record_function, ProfilerActivity
 
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool, 
@@ -57,6 +56,7 @@ parser.add_argument('--output-dir', default='saved_models', type=str, help='outp
 parser.add_argument('--group_surfix', default='timestamp', type=str, help='group name for wandb logging')
 parser.add_argument('--machine_type', default='local', type=str, help='machine type for wandb logging')
 parser.add_argument('--accelerator_type', default='cpu', type=str, help='accelerator type for wandb logging')
+parser.add_argument('--jointspar', default=False, type=bool, help='whether to use JointSpar or not')
 
 qt = RandomQuantizer()
 def distributed(param, rank, size, DEVICE):
@@ -83,8 +83,8 @@ def fgsm(gradz, step_size):
 
 # global global_noise_data
 # global_noise_data = torch.zeros([512, 3, 224, 224]).cuda()
-def train(net, data_loader, optimizer, criterion, DEVICE,
-          descrip_str='', es = (8.0, 10), fast=False, lr_scheduler=None, warmup=False):
+def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es = (8.0, 10), fast=False,
+          lr_scheduler=None, warmup=False, epoch=None, S=None, jointspar=None):
 
     if descrip_str != '':
         descrip = descrip_str.split(':')[0]
@@ -115,7 +115,8 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
                 data = data.to(DEVICE)
                 label = label.to(DEVICE)
 
-            optimizer.zero_grad()
+            if i != 0 or epoch != 0:
+                optimizer.zero_grad()
 
             with record_function("adv_attack"):
                 adv_inp = at.attack(net, data, label)
@@ -177,6 +178,18 @@ def train(net, data_loader, optimizer, criterion, DEVICE,
             pbar_dic['robust loss'] = '{:.2f}'.format(advloss)
             pbar_dic['lr'] = lr_scheduler.get_last_lr()[0]
             pbar.set_postfix(pbar_dic)
+
+        if jointspar is not None:
+            sparsified_grads = []
+            for ind, p in enumerate(net.parameters()):
+                if ind in S:
+                    curr_p = 0 if p.grad is None else p.grad
+                    # if p.grad is None and epoch > 0:
+                    #     print(f'{epoch} {i} {ind} p.grad is None!')
+                    sparsified_grads.append(curr_p / jointspar.p[epoch, ind])
+                else:
+                    sparsified_grads.append([])
+            jointspar.update_p(epoch, sparsified_grads, lr_scheduler.get_last_lr()[0])
     else:
         global global_noise_data
         for i, (data, label) in enumerate(pbar):
@@ -298,6 +311,7 @@ def main():
         eval_epochs = args.eval_epochs
         criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
         global global_noise_data
+
         if args.dataset == 'cifar' or args.dataset == 'cifarext':
             print('using CIFAR dataset')
 
@@ -307,6 +321,9 @@ def main():
             net = PreActResNet18().to(DEVICE)
             net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
             # net = torch.nn.DataParallel(net).to(DEVICE)
+
+            num_layers = sum(1 for _ in net.parameters())
+            print(f'Number of layers: {num_layers}')
 
             print('cifar check 2')
             if args.wolalr:
@@ -387,11 +404,28 @@ def main():
         #     time.sleep(retry_delay)
 
             print('training starts')
+
+            using_jointspar = args.jointspar
+            print(f'Using JointSpar: {args.jointspar}')
+            jointspar = JointSpar(
+                num_layers=num_layers,
+                epochs=num_epochs,
+                sparsity_budget=40,
+                p_min=5.0,
+            )
+
             for epoch in range(num_epochs):
+                if using_jointspar:
+                    S = jointspar.get_active_set(epoch)
+                    for i, p in enumerate(net.parameters()):
+                        p.requires_grad_(i in S)
+                    print(f'p: {jointspar.p[epoch, :]}')
+
 
                 sp_train.set_epoch(epoch)
                 descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
-                train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast, lr_scheduler=lr_scheduler)
+                train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast,
+                      lr_scheduler=lr_scheduler, epoch=epoch, S=S, jointspar=jointspar)
                 lr_scheduler.step()
                 prof.step()
 

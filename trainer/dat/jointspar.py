@@ -1,29 +1,22 @@
 import time
-from typing import List
-
-import torch
 import pickle
+import torch
+import torch.optim as optim
 import matplotlib.pyplot as plt
-import numpy as np 
+
+from typing import List
+from torchvision.datasets import CIFAR10
+from torchvision.transforms import ToTensor
+from torch.nn import KLDivLoss
 
 from trainer.dat.dataset import Cifar_EXT
 from trainer.dat.helpers import send_telegram_message
 from trainer.dat.params import Params
-from utils import seconds_to_string
-from torchvision.datasets import CIFAR10
-from models import PreActResNet18, PreActBlock, GlobalpoolFC
-from torchvision.transforms import ToTensor
-from torch.nn import KLDivLoss
-import torch.optim as optim
-
+from trainer.dat.utils import seconds_to_string
+from trainer.dat.models import PreActResNet18
 
 timing_dict = {
     'get_active_set': {
-        'time': 0.0,
-        'calls': 0,
-        'time_per_call': 0.0
-    },
-    'sparsify_gradient': {
         'time': 0.0,
         'calls': 0,
         'time_per_call': 0.0
@@ -79,22 +72,6 @@ class JointSpar:
         self.S[epoch] = torch.nonzero(self.Z[epoch, :] == 1.0).flatten().tolist()
         #print(f'{epoch}. S: {self.S[epoch]}')
         return self.S[epoch]
-    
-    # Step 5 & 6  ---- redundant and unused
-    @time_jointspar(name='sparsify_gradient')
-    def sparsify_gradient(self, epoch: int, grads: torch.Tensor) -> torch.Tensor:
-        # Set L
-        self.L = torch.max(self.L, max([torch.norm(g) for g in grads]))
-        # 5: normalize
-        grads = grads / self.p[epoch]
-
-        # 6: construct sparsified gradient
-        sparsified_grads = torch.zeros_like(grads)
-        layers_to_compute = torch.tensor(self.S[epoch])
-        #print(f'Layers to compute: {layers_to_compute}')
-        sparsified_grads[layers_to_compute] = grads[layers_to_compute]
-        #print(f'Sparsified grads: {sparsified_grads}')
-        return sparsified_grads
     
     # Algo 1
     @time_jointspar(name='update_p')
