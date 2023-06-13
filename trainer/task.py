@@ -282,6 +282,8 @@ def main():
         print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], int(os.environ['RANK']), int(os.environ['WORLD_SIZE']))
 
     group_name = f'{args.machine_type}_{int(os.environ["WORLD_SIZE"])}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
+    if args.jointspar:
+        group_name = f'JOINTSPAR_{group_name}'
     # Use torch.multiprocessing.spawn to launch distributed processes
     if torch.cuda.is_available():
         torch.multiprocessing.spawn(main_worker, args=(group_name, args), nprocs=args.accelerator_count, join=True)
