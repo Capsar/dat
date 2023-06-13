@@ -43,12 +43,14 @@ def time_jointspar(name):
 
 
 class JointSpar:
-    def __init__(self, num_layers: int, epochs: int, sparsity_budget: int, p_min: float):
+    def __init__(self, num_layers: int, epochs: int, sparsity_budget: int, p_min: int):
         assert sparsity_budget <= num_layers, 'Sparsity budget must be smaller or equal to number of layers.'
         self.num_layers = num_layers
         self.epochs = epochs
         self.sparsity = sparsity_budget
-        self.p_min = torch.tensor(p_min)
+        
+        p_min=p_min/(num_layers * sparsity_budget)
+        self.p_min = torch.tensor(p_min, dtype=torch.float32)
         self.p = torch.zeros((self.epochs + 1, self.num_layers))
 
         p0 = 1 / self.num_layers
