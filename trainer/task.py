@@ -96,6 +96,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.
         descrip = descrip_str.split(':')[0]
         epoch = descrip_str.split(':')[1].split('/')[0]
         total_epoch = descrip_str.split(':')[1].split('/')[1]
+    start = time.perf_counter()
     epoch = int(epoch)
     net.train()
     pbar = tqdm(data_loader, ncols=200, file=sys.stdout)
@@ -184,6 +185,16 @@ def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.
             pbar_dic['robust loss'] = '{:.2f}'.format(advloss)
             pbar_dic['lr'] = lr_scheduler.get_last_lr()[0]
             pbar.set_postfix(pbar_dic)
+
+        delta = time.perf_counter() - start
+        # Add check since warmup epochs don't use JointSpar
+        active_layers = len(S) if S else sum(1 for _ in net.parameters())
+        epoch_done_metrics = {
+            f'{descrip}/num_active_layers': active_layers,
+            f'{descrip}/time_per_epoch': delta,
+            f'{descrip}/epoch': epoch
+        }
+        wandb.log(epoch_done_metrics, commit=False)
 
         if jointspar is not None:
             sparsified_grads = []
@@ -373,6 +384,15 @@ def main_worker(local_rank, group_name, args):
     # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
     #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
 
+    sparsity = 40
+    p_min = 5.0
+    num_layers = sum(1 for _ in net.parameters())
+
+    # Set WandB arguments
+    args.sparsity = sparsity
+    args.pmin = p_min
+    args.numlayers = num_layers
+
     with wandb.init(entity="sdml-dat", project="sdml-dat", group=group_name, name=args.task_name, config=args,
                     sync_tensorboard=True) as wandb_run:
         print('warmup starts')
@@ -384,7 +404,6 @@ def main_worker(local_rank, group_name, args):
             # prof.step()
 
         print('training starts')
-        num_layers = sum(1 for _ in net.parameters())
         print(f'Number of layers: {num_layers}')
         using_jointspar = args.jointspar
         print(f'Using jointspar: {using_jointspar}')
@@ -393,8 +412,8 @@ def main_worker(local_rank, group_name, args):
             jointspar = JointSpar(
                 num_layers=num_layers,
                 epochs=num_epochs,
-                sparsity_budget=40,
-                p_min=5.0
+                sparsity_budget=sparsity,
+                p_min=p_min
             )
 
         for epoch in range(num_epochs):
