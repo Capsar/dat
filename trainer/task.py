@@ -443,10 +443,9 @@ def main_worker(local_rank, group_name, args):
                                 file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
 
         # prof.stop()
-
         print('training done')
         print('eval starts')
-        clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
+        clean_acc, adv_acc = eval(net, ds_val, DEVICE, (args.adv_eps, args.adv_step))
         message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
         if send_telegram_message(message=message):
             print('successfully sent Telegram message!')
