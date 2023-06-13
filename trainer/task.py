@@ -417,7 +417,7 @@ def main_worker(local_rank, group_name, args):
             # Add check since warmup epochs don't use JointSpar
             delta = time.perf_counter() - training_epoch_start_time
             epoch_done_metrics = {
-                f'{training_prefix}/num_active_layers': args.active_layers,
+                f'{training_prefix}/num_active_layers': args.num_layers,
                 f'{training_prefix}/time_per_epoch': delta,
                 f'{training_prefix}/epoch': epoch
             }
