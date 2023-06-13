@@ -145,7 +145,7 @@ class JointSpar:
 
 
 def main(params: Params, plot=False):
-    send_telegram_message(message=f'Starting run with params: {str(params)}')
+    #send_telegram_message(message=f'Starting run with params: {str(params)}')
     epochs = params.epochs
     batch_size = params.batch_size
     sparsity_budget = params.sparsity_budget
@@ -284,7 +284,7 @@ def main(params: Params, plot=False):
     total_time = time.perf_counter() - start
     time_str = seconds_to_string(total_time)
     print(f'Finished Training in {time_str}')
-    send_telegram_message(message=f'Done with run in {time_str} Final accuracy: {accuracies[-1]:.2f}%')
+    #send_telegram_message(message=f'Done with run in {time_str} Final accuracy: {accuracies[-1]:.2f}%')
 
 
 if __name__ == '__main__':
@@ -298,18 +298,18 @@ if __name__ == '__main__':
     param_list = [
         Params(
             epochs=100,
-            batch_size=2048,
+            batch_size=256,
             sparsity_budget=40,
             p_min=p_min,
             learning_rate=0.01,
-            use_cifarext=True,
+            use_cifarext=False,
             use_jointspar=True,
         )
         for p_min in [0.5, 0.05, 0.005, 0.0005]
     ]
     for ind, p in enumerate(param_list):
         main(p)
-        send_telegram_message(f'Remaining runs: {len(param_list) - (ind + 1)}/{len(param_list)}\n\n')
+        #send_telegram_message(f'Remaining runs: {len(param_list) - (ind + 1)}/{len(param_list)}\n\n')
 
 
 ### Cifar Batch 2048 Epochs 100 Sparsity 30: 17M:07S JointSPAR: False

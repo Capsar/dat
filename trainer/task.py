@@ -58,6 +58,7 @@ parser.add_argument('--output-dir', default='saved_models', type=str, help='outp
 parser.add_argument('--group_surfix', default='timestamp', type=str, help='group name for wandb logging')
 parser.add_argument('--machine_type', default='local', type=str, help='machine type for wandb logging')
 parser.add_argument('--accelerator_type', default='cpu', type=str, help='accelerator type for wandb logging')
+parser.add_argument('--jointspar', default=False, type=bool, help='whether to use JointSpar or not')
 
 qt = RandomQuantizer()
 
@@ -95,7 +96,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.
         descrip = descrip_str.split(':')[0]
         epoch = descrip_str.split(':')[1].split('/')[0]
         total_epoch = descrip_str.split(':')[1].split('/')[1]
-
+    epoch = int(epoch)
     net.train()
     pbar = tqdm(data_loader, ncols=200, file=sys.stdout)
     advacc = -1
@@ -169,7 +170,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.
                 f"{descrip}/adv_acc": advacc,
                 f"{descrip}/adv_loss": advloss,
                 f"{descrip}/lr": lr_scheduler.get_last_lr()[0],
-                f"{descrip}/epoch": int(epoch),
+                f"{descrip}/epoch": epoch,
                 f"{descrip}/total_epoch": int(total_epoch),
                 f"{descrip}/rank": rank,
                 f"{descrip}/world_size": size,
@@ -328,7 +329,7 @@ def main_worker(local_rank, group_name, args):
         global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
         print('cifar check 1')
         net = PreActResNet18().to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], find_unused_parameters=True).to(DEVICE)
         # net = torch.nn.DataParallel(net).to(DEVICE)
 
         print('cifar check 2')
