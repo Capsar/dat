@@ -358,7 +358,7 @@ def main_worker(local_rank, group_name, args):
 
     # Set WandB arguments
     args.sparsity_budget = 40
-    args.p_min = 5.0
+    args.p_min = 0.5
     args.num_layers = sum(1 for _ in net.parameters())
     with wandb.init(entity="sdml-dat", project="sdml-dat", group=group_name, name=args.task_name, config=args) as wandb_run:
         print(warmup_prefix:= "Warmup", 'starts')
@@ -375,7 +375,7 @@ def main_worker(local_rank, group_name, args):
             }
             wandb.log(epoch_done_metrics)
 
-        print(training_prefix:="Training", 'starts')
+        print(training_prefix := "Training", 'starts')
         print(f'Number of layers: {args.num_layers}')
         print(f'Using jointspar: {args.jointspar}')
         jointspar = None
@@ -415,19 +415,21 @@ def main_worker(local_rank, group_name, args):
                 jointspar.update_p(epoch, sparsified_grads, lr_scheduler.get_last_lr()[0])
 
             # Add check since warmup epochs don't use JointSpar
+            active_layers = len(S) if S else args.num_layers
             delta = time.perf_counter() - training_epoch_start_time
             epoch_done_metrics = {
-                f'{training_prefix}/num_active_layers': args.num_layers,
+                f'{training_prefix}/num_active_layers': active_layers,
                 f'{training_prefix}/time_per_epoch': delta,
                 f'{training_prefix}/epoch': epoch
             }
             if args.jointspar:
-                epoch_done_metrics[f'{training_prefix}/num_active_layers'] = len(S)
                 epoch_done_metrics[f'{training_prefix}/epoch_p'] = wandb.Histogram(epoch_p.cpu().numpy())
+                epoch_done_metrics[f'{training_prefix}/epoch_p_nohist'] = epoch_p.cpu().numpy()
             wandb.log(epoch_done_metrics)
 
-            # prof.step()
+            send_telegram_message(message=f'Epoch {epoch + 1} #S: {active_layers} S: {S} (args: {args.jointspar})\np: {jointspar.p[epoch, :]}')
 
+            # prof.step()
             if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
                 clean_acc, adv_acc = eval(net, ds_val, DEVICE, (args.adv_eps, args.adv_step))
                 message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'

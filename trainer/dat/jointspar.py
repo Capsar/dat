@@ -48,7 +48,7 @@ class JointSpar:
         self.num_layers = num_layers
         self.epochs = epochs
         self.sparsity = sparsity_budget
-        self.p_min = torch.tensor(p_min)
+        self.p_min = torch.tensor(p_min / sparsity_budget)
         self.p = torch.zeros((self.epochs + 1, self.num_layers))
 
         p0 = 1 / self.num_layers
@@ -67,7 +67,7 @@ class JointSpar:
         # print(f'Current p: {self.p[epoch, :]}')
         sample = torch.rand(self.num_layers)
         #print(f'Pytorch sample: {sample}')
-        self.Z[epoch, :] = torch.where(sample < self.p[epoch, :]*self.sparsity, torch.tensor(1.0), torch.tensor(0.0))
+        self.Z[epoch, :] = torch.where(sample < self.p[epoch, :] * self.sparsity, torch.tensor(1.0), torch.tensor(0.0))
         #print(f'{epoch}. Z: {self.Z[epoch, :]}')
         self.S[epoch] = torch.nonzero(self.Z[epoch, :] == 1.0).flatten().tolist()
         #print(f'{epoch}. S: {self.S[epoch]}')
