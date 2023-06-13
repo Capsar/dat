@@ -46,8 +46,8 @@ parser.add_argument('--num-epochs', default=200, type=int,
                     help='total training epoch')
 parser.add_argument('--eval-epochs', default=10, type=int,
                     help='eval epoch interval')
-parser.add_argument('--fast', action="store_true",
-                    help='whether to use fgsm')
+parser.add_argument('--pdg', default=True, type=bool,
+                    help='whether to use PDG attack')
 parser.add_argument('--wolalr', action="store_true",
                     help='whether to train without layer-wise adptive learning rate')
 parser.add_argument('--lr', default=0.01, type=float,
@@ -90,14 +90,9 @@ def fgsm(gradz, step_size):
 
 # global global_noise_data
 # global_noise_data = torch.zeros([512, 3, 224, 224]).cuda()
-def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.0, 10), fast=False,
-          lr_scheduler=None, warmup=False, epoch=None, S=None, jointspar=None):
-    if descrip_str != '':
-        descrip = descrip_str.split(':')[0]
-        epoch = descrip_str.split(':')[1].split('/')[0]
-        total_epoch = descrip_str.split(':')[1].split('/')[1]
-    start = time.perf_counter()
-    epoch = int(epoch)
+def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, total_epoch, adv_eps, adv_step, pdg=False,
+          lr_scheduler=None, warmup=False, S=None, jointspar=None, start_time=None):
+    descrip_str = '{}:{}/{}'.format(desc_prefix, epoch, total_epoch)
     net.train()
     pbar = tqdm(data_loader, ncols=200, file=sys.stdout)
     advacc = -1
@@ -108,9 +103,8 @@ def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.
     size = (dist.get_world_size())
     rank = dist.get_rank()
 
-    eps, step = es
-    if not fast:
-        at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step, DEVICE=DEVICE)
+    if pdg:
+        at = PGD(eps=adv_eps / 255.0, sigma=2 / 255.0, nb_iter=adv_step, DEVICE=DEVICE)
         for i, (data, label) in enumerate(pbar):
 
             with record_function("broadcast"):
@@ -166,18 +160,14 @@ def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.
                 cleanloss = loss.item()
 
             metrics = {
-                f"{descrip}/clean_acc": cleanacc,
-                f"{descrip}/clean_loss": cleanloss,
-                f"{descrip}/adv_acc": advacc,
-                f"{descrip}/adv_loss": advloss,
-                f"{descrip}/lr": lr_scheduler.get_last_lr()[0],
-                f"{descrip}/epoch": epoch,
-                f"{descrip}/total_epoch": int(total_epoch),
-                f"{descrip}/rank": rank,
-                f"{descrip}/world_size": size,
-                f"{descrip}/batch_nr": i,
+                f"{desc_prefix}/clean_acc": cleanacc,
+                f"{desc_prefix}/clean_loss": cleanloss,
+                f"{desc_prefix}/adv_acc": advacc,
+                f"{desc_prefix}/adv_loss": advloss,
+                f"{desc_prefix}/lr": lr_scheduler.get_last_lr()[0],
+                f"{desc_prefix}/batch_nr": i,
             }
-            wandb.log(metrics)
+            wandb.log(metrics, commit= i < len(pbar) - 1)
             pbar_dic = OrderedDict()
             pbar_dic['standard test acc'] = '{:.2f}'.format(cleanacc)
             pbar_dic['standard test loss'] = '{:.2f}'.format(cleanloss)
@@ -185,32 +175,15 @@ def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.
             pbar_dic['robust loss'] = '{:.2f}'.format(advloss)
             pbar_dic['lr'] = lr_scheduler.get_last_lr()[0]
             pbar.set_postfix(pbar_dic)
+        
 
-        delta = time.perf_counter() - start
-        # Add check since warmup epochs don't use JointSpar
-        active_layers = len(S) if S else sum(1 for _ in net.parameters())
-        epoch_done_metrics = {
-            f'{descrip}/num_active_layers': active_layers,
-            f'{descrip}/time_per_epoch': delta,
-            f'{descrip}/epoch': epoch
-        }
-        wandb.log(epoch_done_metrics, commit=False)
 
-        if jointspar is not None:
-            sparsified_grads = []
-            for ind, p in enumerate(net.parameters()):
-                if ind in S:
-                    curr_p = 0 if p.grad is None else p.grad
-                    sparsified_grads.append(curr_p / jointspar.p[epoch, ind])
-                else:
-                    sparsified_grads.append([])
-            jointspar.update_p(epoch, sparsified_grads, lr_scheduler.get_last_lr()[0])
     else:
         global global_noise_data
         for i, (data, label) in enumerate(pbar):
             data = data.to(DEVICE)
             label = label.to(DEVICE)
-            global_noise_data.uniform_(-eps / 255.0, eps / 255.0)
+            global_noise_data.uniform_(-adv_eps / 255.0, adv_eps / 255.0)
             # sync all parameters at epoch 0
             if i == 0:
                 for param in net.parameters():
@@ -229,9 +202,9 @@ def train(net, data_loader, optimizer, criterion, DEVICE, descrip_str='', es=(8.
                 loss.backward()
 
                 # Update the noise for the next iteration
-                pert = fgsm(noise_batch.grad, 1.25 * eps / 255.0)
+                pert = fgsm(noise_batch.grad, 1.25 * adv_eps / 255.0)
                 global_noise_data[0:data.size(0)] += pert.data
-                global_noise_data.clamp_(-eps / 255.0, eps / 255.0)
+                global_noise_data.clamp_(-adv_eps / 255.0, adv_eps / 255.0)
 
                 # Dscend on the global noise
                 noise_batch = Variable(global_noise_data[0:data.size(0)], requires_grad=False).to(DEVICE)
@@ -306,8 +279,7 @@ def main():
     if args.gcloud:
         # Get the rank and world size from the environment variables
         args.dist_url = 'env://'
-        print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], int(os.environ['RANK']),
-              int(os.environ['WORLD_SIZE']))
+        print(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT'], int(os.environ['RANK']), int(os.environ['WORLD_SIZE']))
 
     group_name = f'{args.machine_type}_{int(os.environ["WORLD_SIZE"])}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
     # Use torch.multiprocessing.spawn to launch distributed processes
@@ -327,8 +299,7 @@ def main_worker(local_rank, group_name, args):
     task_index = cluster_spec["task"]["index"]
     args.task_name = f"{task_type}-{task_index}-DR{int(os.environ['RANK'])}-LR{local_rank}-R{args.rank}"
     wandb.login(key=os.environ['WANDB_API_KEY'])
-    dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size,
-                            rank=args.rank)
+    dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
     torch.cuda.set_device(local_rank)
     batch_size = args.batch_size
     num_epochs = args.num_epochs
@@ -355,7 +326,8 @@ def main_worker(local_rank, group_name, args):
             ds_train, ds_val, sp_train = Cifar.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
         else:
             ds_train, ds_val, sp_train = Cifar_EXT.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
-        es = (8.0, 10)
+        args.adv_eps = 8.0
+        args.adv_step = 10
 
         print('done selecting cifar')
 
@@ -374,65 +346,90 @@ def main_worker(local_rank, group_name, args):
         lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 25, 28], gamma=0.1)
 
         ds_train, ds_val, sp_train = ImageNet.get_loader(batch_size, args.world_size, args.rank, args.dataset_path)
-        es = (2.0, 4)
+        args.adv_eps = 2.0
+        args.adv_step = 4
 
     lr_steps = 5 * len(ds_train)
     print('lr_step:{}'.format(lr_steps))
     lambda1 = lambda step: (step + 1) / lr_steps
     warm_up_lr_lchedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
-
     # lr_scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, cycle_momentum=False, base_lr=0, max_lr=0.15,
     #         step_size_up=lr_steps / 2, step_size_down=lr_steps / 2)
 
-    sparsity = 40
-    p_min = 5.0
-    num_layers = sum(1 for _ in net.parameters())
-
     # Set WandB arguments
-    args.sparsity = sparsity
-    args.pmin = p_min
-    args.numlayers = num_layers
-
-    with wandb.init(entity="sdml-dat", project="sdml-dat", group=group_name, name=args.task_name, config=args,
-                    sync_tensorboard=True) as wandb_run:
-        print('warmup starts')
-
+    args.sparsity_budget = 40
+    args.p_min = 5.0
+    args.num_layers = sum(1 for _ in net.parameters())
+    with wandb.init(entity="sdml-dat", project="sdml-dat", group=group_name, name=args.task_name, config=args) as wandb_run:
+        print(warmup_prefix:= "Warmup", 'starts')
+        
         for epoch in range(args.warmup_epochs):
-            descrip_str = 'Warmup:{}/{}'.format(epoch, args.warmup_epochs)
-            train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast,
+            warm_up_epoch_start_time = time.perf_counter()
+            train(net, ds_train, optimizer, criterion, DEVICE, warmup_prefix, epoch, args.warmup_epochs, args.adv_eps, args.adv_step, pdg=args.pdg,
                   lr_scheduler=warm_up_lr_lchedule, warmup=True)
-            # prof.step()
+            delta = time.perf_counter() - warm_up_epoch_start_time
+            epoch_done_metrics = {
+                f'{warmup_prefix}/num_active_layers': args.num_layers,
+                f'{warmup_prefix}/time_per_epoch': delta,
+                f'{warmup_prefix}/epoch': epoch
+            }
+            wandb.log(epoch_done_metrics)
 
-        print('training starts')
-        print(f'Number of layers: {num_layers}')
-        using_jointspar = args.jointspar
-        print(f'Using jointspar: {using_jointspar}')
+        print(training_prefix:="Training", 'starts')
+        print(f'Number of layers: {args.num_layers}')
+        print(f'Using jointspar: {args.jointspar}')
         jointspar = None
-        if using_jointspar:
+        if args.jointspar:
             jointspar = JointSpar(
-                num_layers=num_layers,
+                num_layers=args.num_layers,
                 epochs=num_epochs,
-                sparsity_budget=sparsity,
-                p_min=p_min
+                sparsity_budget=args.sparsity_budget,
+                p_min=args.p_min
             )
 
         for epoch in range(num_epochs):
+            training_epoch_start_time = time.perf_counter()
             S = None
-            if using_jointspar:
+            if args.jointspar:
                 S = jointspar.get_active_set(epoch)
                 for i, p in enumerate(net.parameters()):
                     p.requires_grad_(i in S)
-                print(f'p: {jointspar.p[epoch, :]}')
-
+                epoch_p = jointspar.p[epoch, :]
+                print(f'p: {epoch_p}')
+            
+            ### NORMAL TRAINING #####
             sp_train.set_epoch(epoch)
-            descrip_str = 'Training:{}/{}'.format(epoch, num_epochs)
-            train(net, ds_train, optimizer, criterion, DEVICE, descrip_str, es, fast=args.fast,
-                  lr_scheduler=lr_scheduler, epoch=epoch, S=S, jointspar=jointspar)
+            train(net, ds_train, optimizer, criterion, DEVICE, training_prefix, epoch, num_epochs, args.adv_eps, args.adv_step, pdg=args.pdg,
+                  lr_scheduler=lr_scheduler)
             lr_scheduler.step()
+            #########################
+
+            if args.jointspar:
+                sparsified_grads = []
+                for ind, p in enumerate(net.parameters()):
+                    if ind in S:
+                        curr_p = 0 if p.grad is None else p.grad
+                        sparsified_grads.append(curr_p / jointspar.p[epoch, ind])
+                    else:
+                        sparsified_grads.append([])
+                jointspar.update_p(epoch, sparsified_grads, lr_scheduler.get_last_lr()[0])
+
+            # Add check since warmup epochs don't use JointSpar
+            delta = time.perf_counter() - training_epoch_start_time
+            epoch_done_metrics = {
+                f'{training_prefix}/num_active_layers': args.active_layers,
+                f'{training_prefix}/time_per_epoch': delta,
+                f'{training_prefix}/epoch': epoch
+            }
+            if args.jointspar:
+                epoch_done_metrics[f'{training_prefix}/num_active_layers'] = len(S)
+                epoch_done_metrics[f'{training_prefix}/epoch_p'] = wandb.Histogram(epoch_p.cpu().numpy())
+            wandb.log(epoch_done_metrics)
+
             # prof.step()
 
             if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
-                clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
+                clean_acc, adv_acc = eval(net, ds_val, DEVICE, (args.adv_eps, args.adv_step))
                 message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
                 if send_telegram_message(message=message):
                     print('successfully sent Telegram message!')
@@ -449,8 +446,12 @@ def main_worker(local_rank, group_name, args):
 
         print('training done')
         print('eval starts')
-
-        eval(net, ds_val, DEVICE, es)
+        clean_acc, adv_acc = eval(net, ds_val, DEVICE, es)
+        message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
+        if send_telegram_message(message=message):
+            print('successfully sent Telegram message!')
+        else:
+            print('error sending Telegram message!')
 
         wandb.finish()
 
