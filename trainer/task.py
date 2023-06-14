@@ -23,8 +23,6 @@ from trainer.dat.helpers import send_telegram_message
 
 import wandb
 
-from torch.profiler import profile, record_function, ProfilerActivity
-
 parser = argparse.ArgumentParser(description='distributed adversarial training')
 parser.add_argument('--gcloud', default=False, type=bool,
                     help='whether the code is running on gcloud')
@@ -79,10 +77,9 @@ def distributed(param, rank, size, DEVICE):
             tmp += qt.dequantize(q, norm)
         param.grad = tmp.to(DEVICE)
     else:
-        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, async_op=True)
 
     param.grad.data /= float(size)
-
 
 def fgsm(gradz, step_size):
     return step_size * torch.sign(gradz)
@@ -106,58 +103,42 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
     if pdg:
         at = PGD(eps=adv_eps / 255.0, sigma=2 / 255.0, nb_iter=adv_step, DEVICE=DEVICE)
         for i, (data, label) in enumerate(pbar):
-
-            with record_function("broadcast"):
-                if i == 0:
-                    for param in net.parameters():
-                        dist.broadcast(param.data, 0)
-
-            with record_function("data_to_device"):
-                data = data.to(DEVICE)
-                label = label.to(DEVICE)
-
-            if i != 0 or epoch != 0:
-                optimizer.zero_grad()
-
-            with record_function("adv_attack"):
-                adv_inp = at.attack(net, data, label)
-                optimizer.zero_grad()
-                net.train()
-
-            with record_function("adv_forward"):
-                pred = net(adv_inp)
-
-            with record_function("adv_loss"):
-                loss = criterion(pred, label)
-                acc = torch_accuracy(pred, label, (1,))
-                advacc = acc[0].item()
-                advloss = loss.item()
-
-            with record_function("adv_backward"):
-                (loss * 1.0).backward()
-
-            with record_function("clean_forward"):
-                pred = net(data)
-
-            with record_function("clean_loss"):
-                loss = criterion(pred, label)
-
-            with record_function("clean_backward"):
-                loss.backward()
-
-            with record_function("distributed"):
+            if i == 0:
                 for param in net.parameters():
+                    dist.broadcast(param.data, 0)
+            data = data.to(DEVICE)
+            label = label.to(DEVICE)
+            
+            if i != 0 or epoch != 0: # Required for JointSpar
+                optimizer.zero_grad()
+
+            adv_inp = at.attack(net, data, label)
+            optimizer.zero_grad()
+            net.train()
+            pred = net(adv_inp)
+            loss = criterion(pred, label)
+
+            acc = torch_accuracy(pred, label, (1,))
+            advacc = acc[0].item()
+            advloss = loss.item()
+            (loss * 1.0).backward()
+
+
+            pred = net(data)
+            loss = criterion(pred, label)
+            loss.backward()
+
+            for param in net.parameters():
+                if param.requires_grad:
                     distributed(param, rank, size, DEVICE)
 
-            with record_function("clean_optimizer_step"):
-                optimizer.step()
-                if warmup:
+            optimizer.step()
+            if warmup:
                     lr_scheduler.step()
 
-            with record_function("clean_loss"):
-                acc = torch_accuracy(pred, label, (1,))
-                cleanacc = acc[0].item()
-                cleanloss = loss.item()
+            acc = torch_accuracy(pred, label, (1,))
+            cleanacc = acc[0].item()
+            cleanloss = loss.item()
 
             metrics = {
                 f"{desc_prefix}/clean_acc": cleanacc,
@@ -176,8 +157,6 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
             pbar_dic['lr'] = lr_scheduler.get_last_lr()[0]
             pbar.set_postfix(pbar_dic)
         
-
-
     else:
         global global_noise_data
         for i, (data, label) in enumerate(pbar):
@@ -284,13 +263,17 @@ def main():
     group_name = f'{args.machine_type}_{int(os.environ["WORLD_SIZE"])}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
     if args.jointspar:
         group_name = f'JOINTSPAR_{group_name}'
+
+    args.output_dir = os.path.join(args.output_dir, group_name)
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir, exist_ok=True)
+
     # Use torch.multiprocessing.spawn to launch distributed processes
     if torch.cuda.is_available():
         torch.multiprocessing.spawn(main_worker, args=(group_name, args), nprocs=args.accelerator_count, join=True)
     else:
         # CPU ONLY
         pass
-
 
 def main_worker(local_rank, group_name, args):
     DEVICE = f'cuda:{local_rank}'
@@ -313,10 +296,9 @@ def main_worker(local_rank, group_name, args):
         global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
         print('cifar check 1')
         net = PreActResNet18().to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
-        #net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank],
-        # find_unused_parameters=True).to(DEVICE)
-        # net = torch.nn.DataParallel(net).to(DEVICE)
+        # net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
+        # net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], find_unused_parameters=True).to(DEVICE)
+        net = torch.nn.DataParallel(net, device_ids=[local_rank]).to(DEVICE)
 
         print('cifar check 2')
         if args.wolalr:
@@ -340,8 +322,8 @@ def main_worker(local_rank, group_name, args):
         global_noise_data = torch.zeros([batch_size, 3, 224, 224]).to(DEVICE)
 
         net = resnet50().to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net).to(DEVICE)
-        # net = torch.nn.DataParallel(net).to(DEVICE)
+        # net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
+        net = torch.nn.DataParallel(net, device_ids=[local_rank]).to(DEVICE)
 
         if args.wolalr:
             optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
@@ -433,7 +415,6 @@ def main_worker(local_rank, group_name, args):
 
             send_telegram_message(message=f'Epoch {epoch + 1} #S: {active_layers} S: {S} (args: {args.jointspar})\np: {jointspar.p[epoch, :]}')
 
-            # prof.step()
             if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
                 clean_acc, adv_acc = eval(net, ds_val, DEVICE, (args.adv_eps, args.adv_step))
                 message = f'EPOCH {epoch + 1} accuracy: {clean_acc:.3f}% adversarial accuracy: {adv_acc:.3f}%'
@@ -442,13 +423,12 @@ def main_worker(local_rank, group_name, args):
                 else:
                     print('error sending Telegram message!')
 
-            if args.rank == 0 and (epoch + 1) % 10 == 0:
-                if not os.path.exists(args.output_dir):
-                    os.mkdir(args.output_dir)
-                save_checkpoint(epoch, net, optimizer, lr_scheduler,
-                                file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
+            # if args.rank == 0 and (epoch + 1) % 10 == 0:
+            #     if not os.path.exists(args.output_dir):
+            #         os.mkdir(args.output_dir)
+            #     save_checkpoint(epoch, net, optimizer, lr_scheduler,
+            #                     file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
 
-        # prof.stop()
         print('training done')
         print('eval starts')
         clean_acc, adv_acc = eval(net, ds_val, DEVICE, (args.adv_eps, args.adv_step))
@@ -461,9 +441,11 @@ def main_worker(local_rank, group_name, args):
         wandb.finish()
 
         # Log p and Z to google cloud storage
-        log_dir = '/gcs/dat-project-bucket/jointspar'
-        file_name = f'{log_dir}/{args.task_name}.obj'
-        with open(file_name, 'wb') as f1:
+        log_dir = os.path.join(args.output_dir, args.task_name)
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        file_path = os.path.join(log_dir, 'jointspar_list_p_Z_S_L.pickle')
+        with open(file_path, 'wb') as f1:
             import pickle
             pickle.dump([jointspar.p, jointspar.Z, jointspar.S, jointspar.L], f1)
 

@@ -13,7 +13,6 @@ setup(
         'requests',
         'wandb',
         'tensorboard',
-        'torch-tb-profiler',
         'python-dotenv'
     ],
     # entry_points={
