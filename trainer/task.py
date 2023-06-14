@@ -313,7 +313,9 @@ def main_worker(local_rank, group_name, args):
         global_noise_data = torch.zeros([batch_size, 3, 32, 32]).to(DEVICE)
         print('cifar check 1')
         net = PreActResNet18().to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], find_unused_parameters=True).to(DEVICE)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
+        #net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank],
+        # find_unused_parameters=True).to(DEVICE)
         # net = torch.nn.DataParallel(net).to(DEVICE)
 
         print('cifar check 2')
@@ -458,6 +460,12 @@ def main_worker(local_rank, group_name, args):
 
         wandb.finish()
 
+        # Log p and Z to google cloud storage
+        log_dir = '/gcs/dat-project-bucket/jointspar'
+        file_name = f'{log_dir}/{args.task_name}.obj'
+        with open(file_name, 'wb') as f1:
+            import pickle
+            pickle.dump([jointspar.p, jointspar.Z, jointspar.S, jointspar.L], f1)
 
 if __name__ == "__main__":
     main()
