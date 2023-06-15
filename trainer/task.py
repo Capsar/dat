@@ -44,10 +44,8 @@ parser.add_argument('--num-epochs', default=200, type=int,
                     help='total training epoch')
 parser.add_argument('--eval-epochs', default=10, type=int,
                     help='eval epoch interval')
-parser.add_argument('--pdg', default=True, type=bool,
-                    help='whether to use PDG attack')
-parser.add_argument('--wolalr', action="store_true",
-                    help='whether to train without layer-wise adptive learning rate')
+parser.add_argument('--pgd', default=int(True), type=int, help='whether to use pgd attack')
+parser.add_argument('--wolalr', action="store_true", help='whether to train without layer-wise adptive learning rate')
 parser.add_argument('--lr', default=0.01, type=float,
                     help='learning rates')
 parser.add_argument('--dataset-path', type=str,
@@ -56,7 +54,7 @@ parser.add_argument('--output-dir', default='saved_models', type=str, help='outp
 parser.add_argument('--group_surfix', default='timestamp', type=str, help='group name for wandb logging')
 parser.add_argument('--machine_type', default='local', type=str, help='machine type for wandb logging')
 parser.add_argument('--accelerator_type', default='cpu', type=str, help='accelerator type for wandb logging')
-parser.add_argument('--jointspar', default=False, type=bool, help='whether to use JointSpar or not')
+parser.add_argument('--jointspar', default=int(False), type=int, help='whether to use JointSpar or not')
 
 qt = RandomQuantizer()
 
@@ -86,7 +84,7 @@ def fgsm(gradz, step_size):
 
 # global global_noise_data
 # global_noise_data = torch.zeros([512, 3, 224, 224]).cuda()
-def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, total_epoch, adv_eps, adv_step, pdg=False,
+def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, total_epoch, adv_eps, adv_step, pgd=False,
           lr_scheduler=None, warmup=False, S=None, jointspar=None, start_time=None):
     descrip_str = '{}:{}/{}'.format(desc_prefix, epoch, total_epoch)
     net.train()
@@ -99,7 +97,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
     size = (dist.get_world_size())
     rank = dist.get_rank()
 
-    if pdg:
+    if pgd:
         at = PGD(eps=adv_eps / 255.0, sigma=2 / 255.0, nb_iter=adv_step, DEVICE=DEVICE)
         for i, (data, label) in enumerate(pbar):
             # NOT REQUIRED WHEN USING DDP
@@ -248,6 +246,7 @@ def eval(net, data_loader, DEVICE, es=(8.0, 20)):
 def main():
     print('start')
     args = parser.parse_args()
+    print('args:', args)
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     args.device = DEVICE
     group_name = f'T_{args.group_surfix}'
@@ -262,6 +261,7 @@ def main():
 
     group_name = f'{args.machine_type}_{int(os.environ["WORLD_SIZE"])}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
     if args.jointspar:
+        print("JointSpar is enabled, creating logging folders:", args.jointspar, type(args.jointspar))
         group_name = f'JOINTSPAR_{group_name}'
         args.output_dir = os.path.join(args.output_dir, group_name)
         if not os.path.exists(args.output_dir):
@@ -350,7 +350,7 @@ def main_worker(local_rank, group_name, args):
         
         for epoch in range(args.warmup_epochs):
             warm_up_epoch_start_time = time.perf_counter()
-            train(net, ds_train, optimizer, criterion, DEVICE, warmup_prefix, epoch, args.warmup_epochs, args.adv_eps, args.adv_step, pdg=args.pdg,
+            train(net, ds_train, optimizer, criterion, DEVICE, warmup_prefix, epoch, args.warmup_epochs, args.adv_eps, args.adv_step, pgd=args.pgd,
                   lr_scheduler=warm_up_lr_lchedule, warmup=True)
             delta = time.perf_counter() - warm_up_epoch_start_time
             epoch_done_metrics = {
@@ -384,7 +384,7 @@ def main_worker(local_rank, group_name, args):
             
             ### NORMAL TRAINING #####
             sp_train.set_epoch(epoch)
-            train(net, ds_train, optimizer, criterion, DEVICE, training_prefix, epoch, num_epochs, args.adv_eps, args.adv_step, pdg=args.pdg,
+            train(net, ds_train, optimizer, criterion, DEVICE, training_prefix, epoch, num_epochs, args.adv_eps, args.adv_step, pgd=args.pgd,
                   lr_scheduler=lr_scheduler)
             lr_scheduler.step()
             #########################
@@ -422,11 +422,11 @@ def main_worker(local_rank, group_name, args):
                 else:
                     print('error sending Telegram message!')
 
-            # if args.rank == 0 and (epoch + 1) % 10 == 0:
-            #     if not os.path.exists(args.output_dir):
-            #         os.mkdir(args.output_dir)
-            #     save_checkpoint(epoch, net, optimizer, lr_scheduler,
-            #                     file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
+            if args.rank == 0 and (epoch + 1) % 10 == 0:
+                if not os.path.exists(args.output_dir):
+                    os.mkdir(args.output_dir)
+                save_checkpoint(epoch, net, optimizer, lr_scheduler,
+                                file_name=os.path.join(args.output_dir, 'epoch-{}.checkpoint'.format(epoch)))
 
         print('training done')
         print('eval starts')
