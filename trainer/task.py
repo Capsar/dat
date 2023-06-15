@@ -60,7 +60,6 @@ parser.add_argument('--jointspar', default=False, type=bool, help='whether to us
 
 qt = RandomQuantizer()
 
-
 def distributed(param, rank, size, DEVICE):
     quantization = False
     if quantization:
@@ -103,9 +102,10 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
     if pdg:
         at = PGD(eps=adv_eps / 255.0, sigma=2 / 255.0, nb_iter=adv_step, DEVICE=DEVICE)
         for i, (data, label) in enumerate(pbar):
-            if i == 0:
-                for param in net.parameters():
-                    dist.broadcast(param.data, 0)
+            # NOT REQUIRED WHEN USING DDP
+            # if i == 0:
+            #     for param in net.parameters():
+            #         dist.broadcast(param.data, 0)
             data = data.to(DEVICE)
             label = label.to(DEVICE)
             
@@ -128,9 +128,9 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
             loss = criterion(pred, label)
             loss.backward()
 
-            for param in net.parameters():
-                if param.requires_grad:
-                    distributed(param, rank, size, DEVICE)
+            # NOT REQUIRE WHEN USING DDP
+            # for param in net.parameters():
+            #     distributed(param, rank, size, DEVICE)
 
             optimizer.step()
             if warmup:
@@ -263,10 +263,9 @@ def main():
     group_name = f'{args.machine_type}_{int(os.environ["WORLD_SIZE"])}_{args.accelerator_type}_{args.accelerator_count}_{args.dataset}_{args.batch_size}_{args.group_surfix}'
     if args.jointspar:
         group_name = f'JOINTSPAR_{group_name}'
-
-    args.output_dir = os.path.join(args.output_dir, group_name)
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir, exist_ok=True)
+        args.output_dir = os.path.join(args.output_dir, group_name)
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir, exist_ok=True)
 
     # Use torch.multiprocessing.spawn to launch distributed processes
     if torch.cuda.is_available():
@@ -297,8 +296,8 @@ def main_worker(local_rank, group_name, args):
         print('cifar check 1')
         net = PreActResNet18().to(DEVICE)
         # net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
-        # net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], find_unused_parameters=True).to(DEVICE)
-        net = torch.nn.DataParallel(net, device_ids=[local_rank]).to(DEVICE)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], find_unused_parameters=True).to(DEVICE)
+        # net = torch.nn.DataParallel(net, device_ids=[local_rank]).to(DEVICE)
 
         print('cifar check 2')
         if args.wolalr:
@@ -440,14 +439,15 @@ def main_worker(local_rank, group_name, args):
 
         wandb.finish()
 
-        # Log p and Z to google cloud storage
-        log_dir = os.path.join(args.output_dir, args.task_name)
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir, exist_ok=True)
-        file_path = os.path.join(log_dir, 'jointspar_list_p_Z_S_L.pickle')
-        with open(file_path, 'wb') as f1:
-            import pickle
-            pickle.dump([jointspar.p, jointspar.Z, jointspar.S, jointspar.L], f1)
+        if args.jointspar:
+            # Log p and Z to google cloud storage
+            log_dir = os.path.join(args.output_dir, args.task_name)
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
+            file_path = os.path.join(log_dir, 'jointspar_list_p_Z_S_L.obj')
+            with open(file_path, 'wb') as f1:
+                import pickle
+                pickle.dump([jointspar.p, jointspar.Z, jointspar.S, jointspar.L], f1)
 
 if __name__ == "__main__":
     main()
