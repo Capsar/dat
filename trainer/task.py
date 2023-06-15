@@ -296,7 +296,7 @@ def main_worker(local_rank, group_name, args):
         print('cifar check 1')
         net = PreActResNet18().to(DEVICE)
         # net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank]).to(DEVICE)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], find_unused_parameters=True).to(DEVICE)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], find_unused_parameters=args.jointspar).to(DEVICE)
         # net = torch.nn.DataParallel(net, device_ids=[local_rank]).to(DEVICE)
 
         print('cifar check 2')
