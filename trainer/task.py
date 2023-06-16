@@ -408,11 +408,10 @@ def main_worker(local_rank, group_name, args):
                 f'{training_prefix}/epoch': epoch
             }
             if args.jointspar:
+                send_telegram_message(message=f'Epoch {epoch + 1} #S: {active_layers} S: {S} (args: {args.jointspar})\np: {jointspar.p[epoch, :]}')
                 epoch_done_metrics[f'{training_prefix}/epoch_p'] = wandb.Histogram(epoch_p.cpu().numpy())
                 epoch_done_metrics[f'{training_prefix}/epoch_p_nohist'] = epoch_p.cpu().numpy()
             wandb.log(epoch_done_metrics)
-
-            send_telegram_message(message=f'Epoch {epoch + 1} #S: {active_layers} S: {S} (args: {args.jointspar})\np: {jointspar.p[epoch, :]}')
 
             if eval_epochs > 0 and (epoch + 1) % eval_epochs == 0:
                 clean_acc, adv_acc = eval(net, ds_val, DEVICE, (args.adv_eps, args.adv_step))
