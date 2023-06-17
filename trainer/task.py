@@ -44,7 +44,7 @@ parser.add_argument('--num-epochs', default=200, type=int,
                     help='total training epoch')
 parser.add_argument('--eval-epochs', default=10, type=int,
                     help='eval epoch interval')
-parser.add_argument('--pgd', default=int(True), type=int, help='whether to use pgd attack')
+parser.add_argument('--adv_mode', default='pgd', choices=['pgd', 'fgsm', 'none'], type=str, help='What type of attack to use')
 parser.add_argument('--wolalr', action="store_true", help='whether to train without layer-wise adptive learning rate')
 parser.add_argument('--lr', default=0.01, type=float,
                     help='learning rates')
@@ -84,7 +84,7 @@ def fgsm(gradz, step_size):
 
 # global global_noise_data
 # global_noise_data = torch.zeros([512, 3, 224, 224]).cuda()
-def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, total_epoch, adv_eps, adv_step, pgd=False,
+def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, total_epoch, adv_eps, adv_step, adv_mode='pgd',
           lr_scheduler=None, warmup=False, S=None, jointspar=None, start_time=None):
     descrip_str = '{}:{}/{}'.format(desc_prefix, epoch, total_epoch)
     net.train()
@@ -97,7 +97,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
     size = (dist.get_world_size())
     rank = dist.get_rank()
 
-    if pgd:
+    if adv_mode=='pgd':
         at = PGD(eps=adv_eps / 255.0, sigma=2 / 255.0, nb_iter=adv_step, DEVICE=DEVICE)
         for i, (data, label) in enumerate(pbar):
             # NOT REQUIRED WHEN USING DDP
@@ -121,7 +121,6 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
             advloss = loss.item()
             (loss * 1.0).backward()
 
-
             pred = net(data)
             loss = criterion(pred, label)
             loss.backward()
@@ -132,7 +131,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
 
             optimizer.step()
             if warmup:
-                    lr_scheduler.step()
+                lr_scheduler.step()
 
             acc = torch_accuracy(pred, label, (1,))
             cleanacc = acc[0].item()
@@ -155,7 +154,7 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
             pbar_dic['lr'] = lr_scheduler.get_last_lr()[0]
             pbar.set_postfix(pbar_dic)
         
-    else:
+    elif adv_mode=='fgsm':
         global global_noise_data
         for i, (data, label) in enumerate(pbar):
             data = data.to(DEVICE)
@@ -203,9 +202,42 @@ def train(net, data_loader, optimizer, criterion, DEVICE, desc_prefix, epoch, to
             pbar_dic['loss'] = '{:.2f}'.format(cleanloss)
             pbar_dic['lr'] = lr_scheduler.get_lr()[0]
             pbar.set_postfix(pbar_dic)
+    elif adv_mode=='none':
+        net.train()
+        for i, (data, label) in enumerate(pbar):
+            data = data.to(DEVICE)
+            label = label.to(DEVICE)
+            
+            if i != 0 or epoch != 0:
+                optimizer.zero_grad()
+
+            pred = net(data)
+            loss = criterion(pred, label)
+
+            loss.backward()
+            optimizer.step()
+            if warmup:
+                lr_scheduler.step()
+
+            acc = torch_accuracy(pred, label, (1,))
+            cleanacc = acc[0].item()
+            cleanloss = loss.item()
+
+            metrics = {
+                f"{desc_prefix}/clean_acc": cleanacc,
+                f"{desc_prefix}/clean_loss": cleanloss,
+                f"{desc_prefix}/lr": lr_scheduler.get_last_lr()[0],
+                f"{desc_prefix}/batch_nr": i,
+            }
+            wandb.log(metrics, commit= i < len(pbar) - 1)
+            pbar_dic = OrderedDict()
+            pbar_dic['standard test acc'] = '{:.2f}'.format(cleanacc)
+            pbar_dic['standard test loss'] = '{:.2f}'.format(cleanloss)
+            pbar_dic['lr'] = lr_scheduler.get_last_lr()[0]
+            pbar.set_postfix(pbar_dic)
 
 
-def eval(net, data_loader, DEVICE, es=(8.0, 20)):
+def eval(net, data_loader, DEVICE, es):
     net.eval()
     pbar = tqdm(data_loader, file=sys.stdout)
     clean_accuracy = AvgMeter()
@@ -224,21 +256,20 @@ def eval(net, data_loader, DEVICE, es=(8.0, 20)):
             clean_accuracy.update(acc[0].item(), acc[0].size(0))
 
         adv_inp = at_eval.attack(net, data, label)
-
         with torch.no_grad():
             pred = net(adv_inp)
             acc = torch_accuracy(pred, label, (1,))
             adv_accuracy.update(acc[0].item(), acc[0].size(0))
 
-        metrics = {
-            f"Evaluation/clean_acc": clean_accuracy.mean,
-            f"Evaluation/adv_acc": adv_accuracy.mean,
-        }
-        wandb.log(metrics)
         pbar_dic = OrderedDict()
         pbar_dic['standard test acc'] = '{:.2f}'.format(clean_accuracy.mean)
         pbar_dic['robust acc'] = '{:.2f}'.format(adv_accuracy.mean)
         pbar.set_postfix(pbar_dic)
+    metrics = {
+        f"Evaluation/clean_acc": clean_accuracy.mean,
+        f"Evaluation/adv_acc": adv_accuracy.mean,
+    }
+    wandb.log(metrics)
 
     return clean_accuracy.mean, adv_accuracy.mean
 
@@ -350,7 +381,7 @@ def main_worker(local_rank, group_name, args):
         
         for epoch in range(args.warmup_epochs):
             warm_up_epoch_start_time = time.perf_counter()
-            train(net, ds_train, optimizer, criterion, DEVICE, warmup_prefix, epoch, args.warmup_epochs, args.adv_eps, args.adv_step, pgd=args.pgd,
+            train(net, ds_train, optimizer, criterion, DEVICE, warmup_prefix, epoch, args.warmup_epochs, args.adv_eps, args.adv_step, adv_mode=args.adv_mode,
                   lr_scheduler=warm_up_lr_lchedule, warmup=True)
             delta = time.perf_counter() - warm_up_epoch_start_time
             epoch_done_metrics = {
@@ -384,7 +415,7 @@ def main_worker(local_rank, group_name, args):
             
             ### NORMAL TRAINING #####
             sp_train.set_epoch(epoch)
-            train(net, ds_train, optimizer, criterion, DEVICE, training_prefix, epoch, num_epochs, args.adv_eps, args.adv_step, pgd=args.pgd,
+            train(net, ds_train, optimizer, criterion, DEVICE, training_prefix, epoch, num_epochs, args.adv_eps, args.adv_step, adv_mode=args.adv_mode,
                   lr_scheduler=lr_scheduler)
             lr_scheduler.step()
             #########################
