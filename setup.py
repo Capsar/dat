@@ -1,8 +1,8 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='dat-trainer',
-    version='0.2',
+    name='dat-jointspar-trainer',
+    version='0.3',
     packages=find_packages(),
     include_package_data=True,
     install_requires=[
@@ -13,7 +13,7 @@ setup(
         'requests',
         'wandb',
         'tensorboard',
-        'torch-tb-profiler',
+        'python-dotenv'
     ],
     # entry_points={
     #         'console_scripts': [

@@ -119,6 +119,7 @@ class PGD(AttackBase):
             eta = torch.FloatTensor(*inp.shape).uniform_(-self.eps, self.eps)
         else:
             eta = torch.zeros_like(inp)
+            
         eta = eta.to(self.DEVICE)
         eta = (eta - self._mean) / self._std
         net.eval()
